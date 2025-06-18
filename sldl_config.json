@@ -1,0 +1,16 @@
+{
+  "spotify_client_id": "0ac323d6b6ca49f3ae9572533895aa90",
+  "spotify_client_secret": "0f11b776b8f44bfca3ae36f22665dc4b",
+  "spotify_redirect_uri": "http://127.0.0.1:8887/callback",
+  "spotify_scope": "playlist-read-private",
+
+  "email": "you@neuroses.me",
+
+  "sldl_user": "Neuroses",
+  "sldl_pass": "08/02/23Ff",
+
+  "sldl_downloads": "/testing/downloads",
+  "working_path": "./working",
+  "cache_path": "./.cache"
+}
+
