@@ -30,16 +30,24 @@ function install_requirements() {
     # Detect package manager and install python3, python3-pip, jq
     if command -v apt >/dev/null 2>&1; then
         apt update
-        apt install -y python3 python3-pip jq
+        apt install -y python3 python3-pip jq wget unzip
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm python python-pip jq
+        pacman -Sy --noconfirm python python-pip jq wget unzip
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip jq
+        dnf install -y python3 python3-pip jq wget unzip
     else
         echo "No supported package manager found (apt, pacman, dnf). Please install python3, pip, and jq manually."
         return 1
     fi
-
+    wget "https://raw.githubusercontent.com/djeverhart/sldl-auto/refs/heads/main/banned_users.txt"
+    wget "https://raw.githubusercontent.com/djeverhart/sldl-auto/refs/heads/main/fullrun.sh"
+    chmod +x fullrun.sh
+    wget "https://raw.githubusercontent.com/djeverhart/sldl-auto/refs/heads/main/sldl_config.json"
+    wget "https://raw.githubusercontent.com/djeverhart/sldl-auto/refs/heads/main/spotify2sldl.py"
+    chmod +x spotify2sldl.py
+    wget "https://github.com/fiso64/slsk-batchdl/releases/download/v2.4.6/sldl_linux-x64.zip"
+    unzip sldl_linux-x64.zip
+    rm sldl.pdb
     python3 -m pip install --upgrade pip --break-system-packages
     python3 -m pip install spotipy pandas --break-system-packages
 
