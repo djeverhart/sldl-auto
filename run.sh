@@ -78,6 +78,8 @@ function dump_artists() {
         return 1
     fi
     python3 "$SPOTIFY_SCRIPT"
+    #echo "Dumping your spotify artists in background. Logging to $LOG_FILE"
+    #tail -f "$LOG_FILE"
 }
 
 function download_artists() {
@@ -110,4 +112,3 @@ while true; do
         *) echo "Invalid choice, try again." ;;
     esac
 done
-
