@@ -57,11 +57,12 @@ def prompt_yes_no(message):
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:
-        tty.setraw(sys.stdin.fileno())
+        tty.setraw(fd)
         response = sys.stdin.read(1)
-        print()  # new line after keypress
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    print("\r")  # carriage return to beginning of line
+    print(" " * 80, end="\r")  # clear the line visually
     return response.lower() == 'y'
 
 # === AUTH ===
