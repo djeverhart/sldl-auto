@@ -49,7 +49,7 @@ function install_requirements() {
     unzip sldl_linux-x64.zip
     rm sldl.pdb
     python3 -m pip install --upgrade pip --break-system-packages
-    python3 -m pip install spotipy pandas --break-system-packages
+    python3 -m pip install spotipy pandas termios tty --break-system-packages
 
     working_path=$(get_working_path)
 
