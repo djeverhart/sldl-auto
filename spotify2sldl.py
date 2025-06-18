@@ -28,7 +28,7 @@ EMAIL = config["email"]
 SLDL_USER = config["sldl_user"]
 SLDL_PASS = config["sldl_pass"]
 
-DOWNLOAD_PATH = config["download_path"]
+DOWNLOAD_PATH = config["sldl_downloads"]
 WORKING_PATH = config["working_path"]
 
 # Paths
