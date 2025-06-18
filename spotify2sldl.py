@@ -5,6 +5,8 @@ import time
 import sys
 import os
 import json
+import tty
+import termios
 
 # === CONFIG LOADING ===
 CONFIG_FILE = "sldl_config.json"
@@ -26,7 +28,7 @@ EMAIL = config["email"]
 SLDL_USER = config["sldl_user"]
 SLDL_PASS = config["sldl_pass"]
 
-DOWNLOAD_PATH = config["sldl_downloads"]
+DOWNLOAD_PATH = config["download_path"]
 WORKING_PATH = config["working_path"]
 
 # Paths
@@ -48,6 +50,19 @@ SKIP_KEYWORDS = [
 # === LOGGING ===
 def log(section, msg):
     print(f"[{section}] {msg}")
+
+# === USER INPUT UTILITY ===
+def prompt_yes_no(message):
+    print(f"{message} [y/n]: ", end="", flush=True)
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(sys.stdin.fileno())
+        response = sys.stdin.read(1)
+        print()  # new line after keypress
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return response.lower() == 'y'
 
 # === AUTH ===
 def authenticate_spotify():
@@ -88,10 +103,8 @@ def get_all_unique_artists(sp):
                 for item in results['items']:
                     track = item.get('track')
                     if track:
-                        track_name = track.get('name') or "Unknown Track"
                         artist_objs = track.get('artists', [])
                         artist_names_in_track = [a.get('name') or "Unknown Artist" for a in artist_objs]
-                        log("TRACK", f"{track_name} → {', '.join(artist_names_in_track)}")
                         artist_names.update(artist_names_in_track)
                         track_count += 1
                 results = sp.next(results) if results['next'] else None
@@ -165,11 +178,21 @@ def get_albums_for_artist(artist_name, mbid):
 def main():
     log("START", "Launching Spotify-to-Soulseek export")
     sp = authenticate_spotify()
-    artists = get_all_unique_artists(sp)
+    all_artists = get_all_unique_artists(sp)
+
+    # === INTERACTIVE FILTERING ===
+    accepted_artists = []
+    for artist in all_artists:
+        if prompt_yes_no(f"Include artist: {artist}?"):
+            accepted_artists.append(artist)
+        else:
+            log("FILTER", f"✗ Rejected artist: {artist}")
+
+    log("FILTER", f"✓ Accepted {len(accepted_artists)} artists")
 
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        for idx, artist in enumerate(artists, 1):
-            log("PROCESS", f"[{idx}/{len(artists)}] {artist}")
+        for idx, artist in enumerate(accepted_artists, 1):
+            log("PROCESS", f"[{idx}/{len(accepted_artists)}] {artist}")
             mbid = get_musicbrainz_id(artist)
             if not mbid:
                 log("SKIP", f"Skipping {artist} — no MBID found")
@@ -181,11 +204,10 @@ def main():
             for album in albums:
                 entry = f"\"artist={artist},album={album}\"  \"format=mp3; br>180\"  \"br>=320; format=flac\""
                 f.write(entry + "\n")
-                f.flush()  # ensures real-time write
+                f.flush()
                 log("WRITE", f"✓ {entry}")
 
     log("DONE", f"All finished. Output saved to: {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()
-
