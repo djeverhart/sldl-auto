@@ -3,7 +3,7 @@
 CONFIG_FILE="./sldl_config.json"
 DOWNLOAD_PATH=$(jq -r '.sldl_downloads' "$CONFIG_FILE")
 WATCH_FILE="nohup.out"
-SLEEP_INTERVAL=120
+SLEEP_INTERVAL=300
 BAN_FILE="banned_users.txt"
 
 # Ensure ban file exists
@@ -15,13 +15,13 @@ readarray -t BANNED_USERS < <(grep -v '^#' "$BAN_FILE")
 SLDL_USER=$(jq -r '.sldl_user' "$CONFIG_FILE")
 SLDL_PASS=$(jq -r '.sldl_pass' "$CONFIG_FILE")
 
-BASE_CMD="./sldl --user $SLDL_USER --pass $SLDL_PASS -p $DOWNLOAD_PATH --input-type list --input sldl-albums.txt --verbose --strict-title --strict-artist --aggregate-length-tol 10 --fast-search --concurrent-downloads 10 --max-stale-time 5000"
+BASE_CMD="./sldl --user $USER --pass $PASS -p $DOWNLOAD_PATH --input-type list --input sldl-albums.txt --album --album-parallel-search --no-browse-folder --fast-search --concurrent-downloads 12 --search-timeout 3000 --max-stale-time 8000 --searches-per-time 30 --searches-renew-time 180 --failed-album-path delete --no-write-index --fails-to-ignore 1 --fails-to-downrank 1 --strict-conditions --verbose"
 
 # Rebuilds full sldl command with banned users
 build_command() {
     local joined=$(printf "%s," "${BANNED_USERS[@]}")
-    joined="${joined%,}"  # Strip trailing comma
-    CMD="$BASE_CMD --banned-users $joined"
+    joined="${joined%,}"
+    CMD="$BASE_CMD --banned-users \"$joined\""
 }
 
 run_script() {
