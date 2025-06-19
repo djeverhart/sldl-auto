@@ -30,11 +30,11 @@ function install_requirements() {
     # Detect package manager and install python3, python3-pip, jq
     if command -v apt >/dev/null 2>&1; then
         apt update
-        apt install -y python3 python3-pip jq wget unzip
+        apt install -y python3 python3-pip jq wget unzip vim
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm python python-pip jq wget unzip
+        pacman -Sy --noconfirm python python-pip jq wget unzip vim
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip jq wget unzip
+        dnf install -y python3 python3-pip jq wget unzip vim
     else
         echo "No supported package manager found (apt, pacman, dnf). Please install python3, pip, and jq manually."
         return 1
