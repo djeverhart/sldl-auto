@@ -10,6 +10,7 @@ PYTHON_TMP=""
 PLAYLISTS_TMP=""
 TIMEOUT_SECONDS=300  # Increased to 5 minutes to match watchdog script
 SCRIPT_PATH="$(realpath "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 BAN_FILE="banned_users.txt"
 
 # Ensure ban file exists
@@ -180,8 +181,8 @@ build_sldl_command() {
     "--concurrent-downloads" "20"
     "--search-timeout" "6000"
     "--max-stale-time" "12000"
-    "--fails-to-ignore" "2"
-    "--fails-to-downrank" "2"
+    "--fails-to-ignore" "1"
+    "--fails-to-downrank" "1"
     "--strict-conditions"
     "--verbose"
   )
@@ -230,6 +231,7 @@ monitor_and_restart() {
               echo "$uploader" >> "$BAN_FILE"
               echo "[$(date '+%F %T')] Added $uploader to ban list, restarting entire script..." >> "$logfile"
               kill_existing_instances
+              cd "$SCRIPT_DIR"
               exec "$SCRIPT_PATH" -s
             else
               echo "[$(date '+%F %T')] User $uploader already banned" >> "$logfile"
@@ -237,6 +239,7 @@ monitor_and_restart() {
           else
             echo "[$(date '+%F %T')] No uploader found to ban, restarting script anyway..." >> "$logfile"
             kill_existing_instances
+            cd "$SCRIPT_DIR"
             exec "$SCRIPT_PATH" -s
           fi
         fi
