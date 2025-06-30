@@ -25,11 +25,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-sanitize_filename() {
-  local filename="$1"
-  echo "$filename" | sed 's/[<>:"/\\|?*]/_/g' | sed 's/\.\+$//' | xargs
-}
-
 print_header() {
   echo -e "\n========================[ Run started at $(date '+%F %T') ]========================\n" >> "$LOGFILE"
 }
@@ -118,45 +113,6 @@ kill_existing_instances() {
   
   # Also kill any existing sldl processes
   pkill -f "$SLSK_BIN" 2>/dev/null || true
-}
-
-process_file_renaming() {
-  local temp_log=$(mktemp)
-  grep -E "(Searching:|Succeeded:)" "$LOGFILE" | tail -100 > "$temp_log"
-
-  local last_search=""
-
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^Searching:\ (.+)\ \([0-9]+s\)$ ]]; then
-      last_search="${BASH_REMATCH[1]}"
-    elif [[ "$line" =~ ^Succeeded:\ +.*\\\.\.\\(.*\.(mp3|flac|m4a|wav)) ]]; then
-      local downloaded_filename="${BASH_REMATCH[1]}"
-      local final_path=$(find "$DL_PATH" -type f -iname "$downloaded_filename" | head -n 1)
-
-      if [[ -n "$final_path" && -f "$final_path" ]]; then
-        local dir=$(dirname "$final_path")
-        local ext="${final_path##*.}"
-        local new_name=$(sanitize_filename "$last_search")
-        local new_path="$dir/${new_name}.${ext}"
-
-        echo "[DEBUG] Renaming: '$final_path' -> '$new_path'" >> "$LOGFILE"
-
-        if [[ "$final_path" != "$new_path" && ! -f "$new_path" ]]; then
-          if mv "$final_path" "$new_path"; then
-            echo "[$(date '+%F %T')] RENAMED: $(basename "$final_path") -> $(basename "$new_path")" >> "$LOGFILE"
-          else
-            echo "[$(date '+%F %T')] FAILED TO RENAME: $(basename "$final_path")" >> "$LOGFILE"
-          fi
-        fi
-      else
-        echo "[DEBUG] File not found on disk: $downloaded_filename" >> "$LOGFILE"
-      fi
-
-      last_search=""
-    fi
-  done < "$temp_log"
-
-  rm -f "$temp_log"
 }
 
 # Extract the last uploader from log (adapted from watchdog script)
@@ -336,18 +292,14 @@ EOF
       # Clean up monitor when sldl finishes
       trap "kill $monitor_pid 2>/dev/null || true" EXIT
 
-      # Wait for sldl to complete and handle file renaming
+      # Wait for sldl to complete
       while kill -0 $sldl_pid 2>/dev/null; do
-        process_file_renaming "$DL_PATH"
         sleep 3
       done
 
       # Kill the monitor for this playlist
       kill $monitor_pid 2>/dev/null || true
 
-      sleep 2
-      process_file_renaming "$DL_PATH"
-      
       echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
 
     done < "$PLAYLISTS_TMP"
