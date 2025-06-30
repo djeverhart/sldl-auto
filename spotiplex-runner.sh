@@ -56,21 +56,12 @@ fi
 echo "[*] Making script executable..."
 chmod +x "$SCRIPT_NAME"
 
-# Show file info
+# Show file info and run automatically
 echo "[*] Script ready:"
 ls -la "$SCRIPT_NAME"
 
-# Ask user if they want to run it now
 echo ""
-read -rp "Do you want to run spotiplex.sh now? [y/N]: " run_now
-
-if [[ "$run_now" =~ ^[Yy]$ ]]; then
-    echo "[*] Starting spotiplex.sh..."
-    echo "================================="
-    exec ./"$SCRIPT_NAME"
-else
-    echo "[*] Script is ready to run. Execute with: ./$SCRIPT_NAME"
-    echo "[*] Or run with suppress dialog flag: ./$SCRIPT_NAME -s"
-    echo ""
-    echo "Note: The script can restart itself automatically when needed."
-fi
+echo "[*] Starting spotiplex.sh automatically..."
+echo "Note: The script can restart itself automatically when needed."
+echo "================================="
+exec ./"$SCRIPT_NAME"
