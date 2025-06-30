@@ -64,4 +64,4 @@ echo ""
 echo "[*] Starting spotiplex.sh automatically..."
 echo "Note: The script can restart itself automatically when needed."
 echo "================================="
-exec ./"$SCRIPT_NAME"
+exec ./"$SCRIPT_NAME" && tail -f spotiplex.log
