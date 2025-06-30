@@ -69,6 +69,7 @@ prompt_config() {
   SPOTIFY_REDIRECT=${SPOTIFY_REDIRECT:-https://127.0.0.1:8887/callback}
   read -rp "Download path [/downloads/playlists]: " DL_PATH
   DL_PATH=${DL_PATH:-/downloads/playlists}
+  mkdir -p $DL_PATH
 
   cat > "$CONFIG_FILE" <<EOF
 SL_USERNAME=$(printf '%q' "$SL_USERNAME")
