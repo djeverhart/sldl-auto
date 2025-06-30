@@ -259,14 +259,6 @@ main_loop() {
   print_header
   source "$CONFIG_FILE"
 
-  # Start tailing the log file immediately in background
-  echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
-  tail -f "$LOGFILE" &
-  local tail_pid=$!
-  
-  # Ensure tail gets killed on exit
-  trap "kill $tail_pid 2>/dev/null || true; cleanup" EXIT
-
   PYTHON_TMP=$(mktemp "$TMPDIR/spotiplex_py_XXXXXX.py")
   PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
 
@@ -323,48 +315,51 @@ EOF
 
   python3 "$PYTHON_TMP"
 
-  while IFS= read -r playlist_url; do
-    playlist_url=$(echo "$playlist_url" | xargs)
-    [[ -z "$playlist_url" ]] && continue
-    
-    echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
-    echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
+  # Process all playlists in background
+  (
+    while IFS= read -r playlist_url; do
+      playlist_url=$(echo "$playlist_url" | xargs)
+      [[ -z "$playlist_url" ]] && continue
+      
+      echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
+      echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
 
-    # Build command with current ban list
-    build_sldl_command
-    
-    # Start the download process
-    "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
-    local sldl_pid=$!
+      # Build command with current ban list
+      build_sldl_command
+      
+      # Start the download process
+      "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
+      local sldl_pid=$!
 
-    # Start monitoring in background
-    monitor_and_restart "$LOGFILE" "$playlist_url" &
-    local monitor_pid=$!
-    
-    # Clean up monitor when sldl finishes
-    trap "kill $monitor_pid 2>/dev/null || true" EXIT
+      # Start monitoring in background
+      monitor_and_restart "$LOGFILE" "$playlist_url" &
+      local monitor_pid=$!
+      
+      # Clean up monitor when sldl finishes
+      trap "kill $monitor_pid 2>/dev/null || true" EXIT
 
-    # Wait for sldl to complete and handle file renaming
-    while kill -0 $sldl_pid 2>/dev/null; do
+      # Wait for sldl to complete and handle file renaming
+      while kill -0 $sldl_pid 2>/dev/null; do
+        process_file_renaming "$DL_PATH"
+        sleep 3
+      done
+
+      # Kill the monitor for this playlist
+      kill $monitor_pid 2>/dev/null || true
+
+      sleep 2
       process_file_renaming "$DL_PATH"
-      sleep 3
-    done
+      
+      echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
 
-    # Kill the monitor for this playlist
-    kill $monitor_pid 2>/dev/null || true
+    done < "$PLAYLISTS_TMP"
 
-    sleep 2
-    process_file_renaming "$DL_PATH"
-    
-    echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
+    echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
+  ) &
 
-  done < "$PLAYLISTS_TMP"
-
-  echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
-  
-  # Keep tail running until user interrupts
-  echo "[$(date '+%F %T')] Downloads complete. Press Ctrl+C to exit." >> "$LOGFILE"
-  wait $tail_pid 2>/dev/null || true
+  # Start tailing the log file in the foreground
+  echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
+  tail -f "$LOGFILE"
 }
 
 SUPPRESS_DIALOG=0
