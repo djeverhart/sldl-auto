@@ -69,7 +69,6 @@ prompt_config() {
   SPOTIFY_REDIRECT=${SPOTIFY_REDIRECT:-https://127.0.0.1:8887/callback}
   read -rp "Download path [/downloads/playlists]: " DL_PATH
   DL_PATH=${DL_PATH:-/downloads/playlists}
-  mkdir -p $DL_PATH
 
   cat > "$CONFIG_FILE" <<EOF
 SL_USERNAME=$(printf '%q' "$SL_USERNAME")
@@ -179,11 +178,13 @@ build_sldl_command() {
     "--strict-title"
     "--strict-artist"
     "--fast-search"
-    "--concurrent-downloads" "20"
+    "--concurrent-downloads" "12"
     "--search-timeout" "6000"
     "--max-stale-time" "12000"
-    "--fails-to-ignore" "1"
-    "--fails-to-downrank" "1"
+    "--searches-per-time" "20"
+    "--searches-renew-time" "240"
+    "--fails-to-ignore" "2"
+    "--fails-to-downrank" "2"
     "--strict-conditions"
     "--verbose"
   )
@@ -257,6 +258,14 @@ monitor_and_restart() {
 main_loop() {
   print_header
   source "$CONFIG_FILE"
+
+  # Start tailing the log file immediately in background
+  echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
+  tail -f "$LOGFILE" &
+  local tail_pid=$!
+  
+  # Ensure tail gets killed on exit
+  trap "kill $tail_pid 2>/dev/null || true; cleanup" EXIT
 
   PYTHON_TMP=$(mktemp "$TMPDIR/spotiplex_py_XXXXXX.py")
   PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
@@ -352,6 +361,10 @@ EOF
   done < "$PLAYLISTS_TMP"
 
   echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
+  
+  # Keep tail running until user interrupts
+  echo "[$(date '+%F %T')] Downloads complete. Press Ctrl+C to exit." >> "$LOGFILE"
+  wait $tail_pid 2>/dev/null || true
 }
 
 SUPPRESS_DIALOG=0
