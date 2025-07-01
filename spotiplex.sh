@@ -350,9 +350,9 @@ main_loop() {
   PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
 
   cat > "$PYTHON_TMP" <<EOF
+import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import os
 
 auth = SpotifyOAuth(
     client_id="$SPOTIFY_ID",
@@ -360,6 +360,7 @@ auth = SpotifyOAuth(
     redirect_uri="$SPOTIFY_REDIRECT",
     scope="playlist-read-private playlist-read-collaborative",
     open_browser=False,
+    cache_path=os.path.expanduser("~/.cache/spotiplex-token"),
     show_dialog=True
 )
 
@@ -395,23 +396,21 @@ while True:
         urls.append(playlist["external_urls"]["spotify"])
     offset += 50
 
-with open("$PLAYLISTS_TMP", "w") as f:
+with open("$PLAYLISTS_TMP", "w", encoding="utf-8") as f:
     for url in urls:
         f.write(url + "\\n")
 EOF
 
   python3 "$PYTHON_TMP"
 
-  # Process all playlists in background
   (
     while IFS= read -r playlist_url; do
       playlist_url=$(echo "$playlist_url" | xargs)
       [[ -z "$playlist_url" ]] && continue
-      
+
       echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
       echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
 
-      # Get playlist name from Spotify API first
       local playlist_name=$(get_playlist_info "$playlist_url")
       if [[ -z "$playlist_name" ]]; then
         echo "[$(date '+%F %T')] Warning: Could not get playlist name from Spotify API" >> "$LOGFILE"
@@ -419,39 +418,23 @@ EOF
         echo "[$(date '+%F %T')] Playlist name: $playlist_name" >> "$LOGFILE"
       fi
 
-      # Build command with current ban list
       build_sldl_command
-      
-      # Start the download process
       "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
       local sldl_pid=$!
 
-      # Start monitoring in background
       monitor_and_restart "$LOGFILE" "$playlist_url" &
       local monitor_pid=$!
-      
-      # Clean up monitor when sldl finishes
       trap "kill $monitor_pid 2>/dev/null || true" EXIT
 
-      # Wait for sldl to complete
-      while kill -0 $sldl_pid 2>/dev/null; do
-        sleep 3
-      done
-
-      # Kill the monitor for this playlist
+      while kill -0 $sldl_pid 2>/dev/null; do sleep 3; done
       kill $monitor_pid 2>/dev/null || true
 
       echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
-      
-      # Process the completed playlist folder for file renaming
+
       local playlist_folder=""
-      
-      # Try multiple methods to find the playlist folder
-      # Method 1: Use the playlist name we got from Spotify API
       if [[ -n "$playlist_name" ]]; then
         playlist_folder="$DL_PATH/$playlist_name"
         if [[ ! -d "$playlist_folder" ]]; then
-          # Try without sanitization in case sldl uses the raw name
           local playlist_id="${playlist_url##*/}"
           playlist_id="${playlist_id%%\?*}"
           local raw_name=$(python3 -c "
@@ -468,20 +451,18 @@ except: pass
           fi
         fi
       fi
-      
-      # Method 2: Look for the most recently modified directory in DL_PATH
+
       if [[ ! -d "$playlist_folder" ]]; then
         playlist_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
       fi
-      
-      # Method 3: Try to extract from sldl log output
+
       if [[ ! -d "$playlist_folder" ]]; then
         local extracted_name=$(extract_playlist_name_from_log)
         if [[ -n "$extracted_name" ]]; then
           playlist_folder="$DL_PATH/$extracted_name"
         fi
       fi
-      
+
       if [[ -n "$playlist_folder" && -d "$playlist_folder" ]]; then
         echo "[$(date '+%F %T')] Processing playlist folder: $playlist_folder" >> "$LOGFILE"
         process_completed_playlist "$playlist_folder"
@@ -497,10 +478,10 @@ except: pass
     echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
   ) &
 
-  # Start tailing the log file in the foreground
   echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
   tail -f "$LOGFILE"
 }
+
 
 # Debug mode for testing single playlist
 debug_single_playlist() {
