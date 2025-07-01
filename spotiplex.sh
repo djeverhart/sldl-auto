@@ -120,6 +120,139 @@ extract_last_uploader() {
   grep -oP 'Initialize:\s+\K[^\\]+' "$LOGFILE" | tail -n 1
 }
 
+# Sanitize filename by removing/replacing problematic characters
+sanitize_filename() {
+  local name="$1"
+  python3 -c "
+name = '''$name'''
+# Replace problematic characters
+name = name.replace('/', '-').replace('\\\\', '-')
+for ch in ['?', '*', ':', '\"', '<', '>', '|']:
+    name = name.replace(ch, '')
+name = name.strip(' .')
+print(name)
+"
+}
+
+# Extract playlist name from sldl output
+extract_playlist_name_from_log() {
+  local playlist_line=$(grep -E "(Downloading playlist:|Processing playlist:|Album:|Playlist:)" "$LOGFILE" | tail -n 1)
+  if [[ -n "$playlist_line" ]]; then
+    local name=$(echo "$playlist_line" | sed -E 's/.*(Downloading playlist:|Processing playlist:|Album:|Playlist:)\s*//g' | sed 's/[[:space:]]*$//')
+    echo "$name"
+  else
+    echo ""
+  fi
+}
+
+# Get playlist info from Spotify API
+get_playlist_info() {
+  local playlist_url="$1"
+  local playlist_id="${playlist_url##*/}"
+  playlist_id="${playlist_id%%\?*}"  # Remove query params if any
+
+  local py_tmp=$(mktemp "$TMPDIR/spotiplex_info_XXXXXX.py")
+
+  cat > "$py_tmp" <<EOF
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+import sys
+
+try:
+    auth = SpotifyClientCredentials(
+        client_id="$SPOTIFY_ID",
+        client_secret="$SPOTIFY_SECRET"
+    )
+    sp = spotipy.Spotify(auth_manager=auth)
+    playlist = sp.playlist("$playlist_id", fields="name")
+    print(playlist['name'])
+except Exception as e:
+    print("", file=sys.stderr)
+EOF
+
+  local playlist_name=$(python3 "$py_tmp" 2>/dev/null)
+  rm -f "$py_tmp"
+
+  if [[ -n "$playlist_name" ]]; then
+    sanitize_filename "$playlist_name"
+  else
+    echo ""
+  fi
+}
+
+# Process completed playlist folder
+process_completed_playlist() {
+  local playlist_dir="$1"
+  local index_file="$playlist_dir/_index.sldl"
+
+  echo "[$(date '+%F %T')] Processing playlist: $playlist_dir"
+
+  [[ ! -f "$index_file" ]] && { echo "No index file at $index_file, skipping"; return; }
+
+  local temp_index
+  temp_index=$(mktemp)
+
+  python3 - "$index_file" "$playlist_dir" "$temp_index" <<'EOF'
+import sys
+import csv
+import os
+import shutil
+
+index_path = sys.argv[1]
+playlist_dir = sys.argv[2]
+temp_index_path = sys.argv[3]
+
+with open(index_path, newline='', encoding='utf-8') as f_in, open(temp_index_path, 'w', newline='', encoding='utf-8') as f_out:
+    reader = csv.reader(f_in)
+    writer = csv.writer(f_out)
+
+    header = next(reader)
+    writer.writerow(header)
+
+    for row in reader:
+        if not row or len(row) < 8:
+            continue
+        filepath, artist, album, title, length, tracktype, state, failurereason = row
+
+        if not filepath.strip():
+            print(f"[{sys.argv[0]}] Skipping empty filepath: artist='{artist}', title='{title}'")
+            writer.writerow([''] + row[1:])
+            continue
+
+        original_path = os.path.join(playlist_dir, filepath.strip('./\\'))
+
+        if not os.path.isfile(original_path):
+            print(f"[{sys.argv[0]}] File missing: {original_path}")
+            writer.writerow(row)
+            continue
+
+        def sanitize(s):
+            return ''.join(c for c in s if c not in '/\\?*:\"<>|').strip(' .')
+
+        new_name = f"{sanitize(artist)} - {sanitize(title)}"
+        ext = os.path.splitext(filepath)[1]
+        new_filename = new_name + ext
+        new_path = os.path.join(playlist_dir, new_filename)
+
+        if os.path.abspath(original_path) != os.path.abspath(new_path):
+            print(f"[{sys.argv[0]}] Renaming '{os.path.basename(original_path)}' → '{new_filename}'")
+            try:
+                shutil.move(original_path, new_path)
+            except Exception as e:
+                print(f"[{sys.argv[0]}] Rename failed: {e}")
+                writer.writerow(row)
+                continue
+
+        # If any field contains a comma, csv will quote it correctly
+        writer.writerow([new_filename, artist, album, title, length, tracktype, state, failurereason])
+EOF
+
+  mv "$temp_index" "$index_file"
+  echo "[$(date '+%F %T')] Completed rename and index rewrite."
+}
+
+
+
 # Build sldl command with banned users
 build_sldl_command() {
   local base_cmd="$SLSK_BIN"
@@ -278,6 +411,14 @@ EOF
       echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
       echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
 
+      # Get playlist name from Spotify API first
+      local playlist_name=$(get_playlist_info "$playlist_url")
+      if [[ -z "$playlist_name" ]]; then
+        echo "[$(date '+%F %T')] Warning: Could not get playlist name from Spotify API" >> "$LOGFILE"
+      else
+        echo "[$(date '+%F %T')] Playlist name: $playlist_name" >> "$LOGFILE"
+      fi
+
       # Build command with current ban list
       build_sldl_command
       
@@ -301,6 +442,55 @@ EOF
       kill $monitor_pid 2>/dev/null || true
 
       echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
+      
+      # Process the completed playlist folder for file renaming
+      local playlist_folder=""
+      
+      # Try multiple methods to find the playlist folder
+      # Method 1: Use the playlist name we got from Spotify API
+      if [[ -n "$playlist_name" ]]; then
+        playlist_folder="$DL_PATH/$playlist_name"
+        if [[ ! -d "$playlist_folder" ]]; then
+          # Try without sanitization in case sldl uses the raw name
+          local playlist_id="${playlist_url##*/}"
+          playlist_id="${playlist_id%%\?*}"
+          local raw_name=$(python3 -c "
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
+try:
+    auth = SpotifyClientCredentials(client_id='$SPOTIFY_ID', client_secret='$SPOTIFY_SECRET')
+    sp = spotipy.Spotify(auth_manager=auth)
+    print(sp.playlist('$playlist_id', fields='name')['name'])
+except: pass
+" 2>/dev/null)
+          if [[ -n "$raw_name" ]]; then
+            playlist_folder="$DL_PATH/$raw_name"
+          fi
+        fi
+      fi
+      
+      # Method 2: Look for the most recently modified directory in DL_PATH
+      if [[ ! -d "$playlist_folder" ]]; then
+        playlist_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+      fi
+      
+      # Method 3: Try to extract from sldl log output
+      if [[ ! -d "$playlist_folder" ]]; then
+        local extracted_name=$(extract_playlist_name_from_log)
+        if [[ -n "$extracted_name" ]]; then
+          playlist_folder="$DL_PATH/$extracted_name"
+        fi
+      fi
+      
+      if [[ -n "$playlist_folder" && -d "$playlist_folder" ]]; then
+        echo "[$(date '+%F %T')] Processing playlist folder: $playlist_folder" >> "$LOGFILE"
+        process_completed_playlist "$playlist_folder"
+      else
+        echo "[$(date '+%F %T')] Could not determine playlist folder for renaming" >> "$LOGFILE"
+        echo "[$(date '+%F %T')] Checked paths: $DL_PATH/$playlist_name" >> "$LOGFILE"
+        echo "[$(date '+%F %T')] Available folders in $DL_PATH:" >> "$LOGFILE"
+        ls -la "$DL_PATH" >> "$LOGFILE" 2>&1
+      fi
 
     done < "$PLAYLISTS_TMP"
 
@@ -312,19 +502,299 @@ EOF
   tail -f "$LOGFILE"
 }
 
+# Debug mode for testing single playlist
+debug_single_playlist() {
+  local playlist_url="$1"
+  
+  # Set debug flag for extra output
+  export DEBUG_MODE=1
+  
+  echo "=== DEBUG MODE ==="
+  echo "Testing playlist: $playlist_url"
+  echo ""
+  
+  # Load config
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "ERROR: No config file found. Run script normally first to create config."
+    exit 1
+  fi
+  
+  source "$CONFIG_FILE"
+  
+  # Initialize variables
+  local sldl_folder=""
+  local sldl_playlist_name=""
+  
+  # Get playlist info from Spotify
+  echo "[DEBUG] Getting playlist info from Spotify API..."
+  local playlist_name=$(get_playlist_info "$playlist_url")
+  
+  if [[ -n "$playlist_name" ]]; then
+    echo "[DEBUG] ✓ Playlist name: '$playlist_name'"
+    echo "[DEBUG] Expected folder: $DL_PATH/$playlist_name"
+  else
+    echo "[DEBUG] ✗ Failed to get playlist name from Spotify API"
+  fi
+  
+  # Build and show sldl command
+  echo ""
+  echo "[DEBUG] Building sldl command..."
+  build_sldl_command
+  
+  # Run the actual download
+  echo ""
+  echo "[DEBUG] Starting download..."
+  echo "[DEBUG] Monitoring sldl output for folder creation..."
+  echo "========================="
+  
+  # Create a temp file to capture sldl output
+  local temp_output=$(mktemp)
+  
+  "${SLDL_CMD[@]}" "$playlist_url" 2>&1 | tee "$temp_output" | tee -a "$LOGFILE"
+  
+  echo "========================="
+  echo "[DEBUG] Download completed"
+  echo ""
+  
+  # Try to extract the actual folder name from sldl output
+  echo "[DEBUG] Analyzing sldl output for folder information..."
+  local sldl_folder=""
+  
+  # Look for common patterns in sldl output that indicate folder creation
+  # Patterns to look for: "Downloading to", "Output directory", "Saving to", etc.
+  if grep -q "Downloading.*to '" "$temp_output"; then
+    sldl_folder=$(grep -oP "Downloading.*to '\K[^']+" "$temp_output" | head -1 | xargs dirname)
+    echo "[DEBUG] Extracted folder from 'Downloading to' pattern: $sldl_folder"
+  fi
+  
+  # Also check for album/playlist name in output
+  local sldl_playlist_name=""
+  if grep -q "Album:" "$temp_output"; then
+    sldl_playlist_name=$(grep -oP "Album:\s*\K.*" "$temp_output" | head -1)
+    echo "[DEBUG] sldl reported album/playlist name: $sldl_playlist_name"
+  fi
+  
+  rm -f "$temp_output"
+  
+  # Now test folder detection
+  echo "[DEBUG] Testing folder detection..."
+  
+  local found_folder=""
+  
+  # Method 1: Expected path using playlist name from API
+  if [[ -n "$playlist_name" && -d "$DL_PATH/$playlist_name" ]]; then
+    found_folder="$DL_PATH/$playlist_name"
+    echo "[DEBUG] ✓ Method 1 SUCCESS: Found via expected path: $found_folder"
+  else
+    echo "[DEBUG] ✗ Method 1 FAILED: Expected path not found: $DL_PATH/$playlist_name"
+    # Also check without parentheses in case sldl strips them
+    local sanitized_name="${playlist_name//[()]/}"
+    if [[ "$sanitized_name" != "$playlist_name" && -d "$DL_PATH/$sanitized_name" ]]; then
+      found_folder="$DL_PATH/$sanitized_name"
+      echo "[DEBUG] ✓ Method 1b SUCCESS: Found with sanitized name: $found_folder"
+    fi
+  fi
+  
+  # Method 2: Try to find from sldl output in log
+  if [[ -z "$found_folder" ]]; then
+    echo "[DEBUG] Trying method 2: Extract from log..."
+    local extracted_name=$(extract_playlist_name_from_log)
+    if [[ -n "$extracted_name" ]]; then
+      local test_path="$DL_PATH/$extracted_name"
+      if [[ -d "$test_path" ]]; then
+        found_folder="$test_path"
+        echo "[DEBUG] ✓ Method 2 SUCCESS: Found via log extraction: $found_folder"
+      else
+        echo "[DEBUG] ✗ Method 2 FAILED: Extracted '$extracted_name' but path doesn't exist"
+      fi
+    else
+      echo "[DEBUG] ✗ Method 2 FAILED: Could not extract name from log"
+    fi
+  fi
+  
+  # Method 3: Most recent folder
+  if [[ -z "$found_folder" ]]; then
+    echo "[DEBUG] Trying method 3: Most recent folder..."
+    found_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    if [[ -n "$found_folder" ]]; then
+      echo "[DEBUG] ✓ Method 3 SUCCESS: Found via most recent: $found_folder"
+    else
+      echo "[DEBUG] ✗ Method 3 FAILED: No folders found"
+    fi
+  fi
+  
+  # Method 4: Look for any folder with an _index.sldl file
+  if [[ -z "$found_folder" ]]; then
+    echo "[DEBUG] Trying method 4: Any folder with _index.sldl..."
+    while IFS= read -r -d '' index_file; do
+      local parent_dir=$(dirname "$index_file")
+      # Check if this index was modified recently (within last 5 minutes)
+      if [[ $(find "$index_file" -mmin -5 -print 2>/dev/null) ]]; then
+        found_folder="$parent_dir"
+        echo "[DEBUG] ✓ Method 4 SUCCESS: Found via recent index file: $found_folder"
+        break
+      fi
+    done < <(find "$DL_PATH" -maxdepth 2 -name "_index.sldl" -print0 2>/dev/null)
+    
+    if [[ -z "$found_folder" ]]; then
+      echo "[DEBUG] ✗ Method 4 FAILED: No recent _index.sldl files found"
+    fi
+  fi
+  
+  # Show all folders in download path for debugging
+  echo ""
+  echo "[DEBUG] All folders in $DL_PATH:"
+  ls -la "$DL_PATH" | grep '^d'
+  
+  echo ""
+  echo "[DEBUG] Looking for folders modified in last 10 minutes:"
+  find "$DL_PATH" -maxdepth 1 -type d -mmin -10 -not -path "$DL_PATH" -exec ls -ld {} \; 2>/dev/null || echo "[DEBUG] No recently modified folders"
+  recent_files=$(find "$found_folder" -maxdepth 1 -type f -mmin -10 -print | wc -l 2>/dev/null || echo 0)
+  # If we found a folder, test renaming
+  if [[ -n "$found_folder" && -d "$found_folder" ]]; then
+    echo ""
+    echo "[DEBUG] Found folder: $found_folder"
+    
+    if [[ $recent_files -eq 0 ]]; then
+      echo "[DEBUG] WARNING: This folder has no recently modified files!"
+      echo "[DEBUG] This might be the wrong folder."
+    fi
+    
+    echo ""
+    echo "[DEBUG] Contents before rename:"
+    ls -la "$found_folder" | grep -E "\.(mp3|flac|m4a|ogg)$" | head -20 || echo "[DEBUG] No music files found"
+    
+    if [[ -f "$found_folder/_index.sldl" ]]; then
+      echo ""
+      echo "[DEBUG] Index file sample:"
+      head -10 "$found_folder/_index.sldl"
+      
+      echo ""
+      echo "[DEBUG] Index file stats:"
+      echo "  Total lines: $(wc -l < "$found_folder/_index.sldl")"
+      echo "  Modified: $(stat -c "%y" "$found_folder/_index.sldl" 2>/dev/null || stat -f "%Sm" "$found_folder/_index.sldl" 2>/dev/null || echo "unknown")"
+    else
+      echo ""
+      echo "[DEBUG] WARNING: No _index.sldl file found!"
+    fi
+    
+    echo ""
+    echo "[DEBUG] Running rename process..."
+    echo "========================="
+    
+    # Run the rename with extra debug output
+    process_completed_playlist "$found_folder"
+    
+    echo "========================="
+    echo ""
+    echo "[DEBUG] Contents after rename:"
+    ls -la "$found_folder" | head -10
+    
+    echo ""
+    echo "[DEBUG] Mismatch Analysis:"
+    echo "[DEBUG] Files in folder but not in index:"
+    
+    # Get list of files in folder
+    local folder_files=()
+    while IFS= read -r -d '' file; do
+      folder_files+=("$(basename "$file")")
+    done < <(find "$found_folder" -maxdepth 1 -type f -name "*.mp3" -print0)
+    
+    # Get list of files from index
+    local index_files=()
+    if [[ -f "$found_folder/_index.sldl" ]]; then
+      while IFS=, read -r filepath rest; do
+        if [[ "$filepath" != "filepath" ]]; then
+          filepath="${filepath#./}"
+          filepath="${filepath%\"}"
+          filepath="${filepath#\"}"
+          index_files+=("$filepath")
+        fi
+      done < "$found_folder/_index.sldl"
+    fi
+    
+    # Show files in folder but not in index
+    for file in "${folder_files[@]}"; do
+      if [[ ! " ${index_files[*]} " =~ " ${file} " ]]; then
+        echo "  - $file"
+      fi
+    done
+    
+    echo ""
+    echo "[DEBUG] Files in index but not in folder:"
+    for file in "${index_files[@]}"; do
+      if [[ ! " ${folder_files[*]} " =~ " ${file} " ]]; then
+        echo "  - $file"
+      fi
+    done
+  else
+    echo ""
+    echo "[DEBUG] ERROR: Could not find downloaded folder!"
+    echo "[DEBUG] Checked paths:"
+    echo "  - $DL_PATH/$playlist_name"
+    echo "  - Most recent folder in $DL_PATH"
+  fi
+  
+  echo ""
+  echo "[DEBUG] === SUMMARY ==="
+  echo "[DEBUG] Spotify playlist name: ${playlist_name:-'(failed to get)'}"
+  echo "[DEBUG] Expected folder path: $DL_PATH/${playlist_name:-'???'}"
+  echo "[DEBUG] Actual folder found: ${found_folder:-'(none)'}"
+  
+  if [[ -n "$sldl_playlist_name" ]] && [[ "$sldl_playlist_name" != "$playlist_name" ]]; then
+    echo "[DEBUG] Note: sldl used different name: $sldl_playlist_name"
+  fi
+  
+  echo ""
+  echo "=== DEBUG MODE COMPLETE ==="
+}
+
+# Parse command line arguments
 SUPPRESS_DIALOG=0
-if [[ "${1:-}" == "-s" ]]; then
-  SUPPRESS_DIALOG=1
-fi
+DEBUG_MODE=0
+DEBUG_URL=""
 
-kill_existing_instances
-install_dependencies
-download_sldl
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -s)
+      SUPPRESS_DIALOG=1
+      shift
+      ;;
+    -d)
+      DEBUG_MODE=1
+      DEBUG_URL="${2:-}"
+      if [[ -z "$DEBUG_URL" ]]; then
+        echo "Error: -d requires a playlist URL"
+        echo "Usage: $0 -d <spotify_playlist_url>"
+        exit 1
+      fi
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [-s] [-d <spotify_playlist_url>]"
+      exit 1
+      ;;
+  esac
+done
 
-if [[ $SUPPRESS_DIALOG -eq 1 ]]; then
-  [[ -f "$CONFIG_FILE" ]] || { echo "No config file found, cannot suppress prompts."; exit 1; }
+# Run appropriate mode
+if [[ $DEBUG_MODE -eq 1 ]]; then
+  # Debug mode - single playlist test
+  install_dependencies
+  download_sldl
+  debug_single_playlist "$DEBUG_URL"
 else
-  check_or_create_config
-fi
+  # Normal mode
+  kill_existing_instances
+  install_dependencies
+  download_sldl
 
-main_loop
+  if [[ $SUPPRESS_DIALOG -eq 1 ]]; then
+    [[ -f "$CONFIG_FILE" ]] || { echo "No config file found, cannot suppress prompts."; exit 1; }
+  else
+    check_or_create_config
+  fi
+
+  main_loop
+fi
