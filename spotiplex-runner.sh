@@ -12,17 +12,17 @@ install_dos2unix() {
     echo "[*] Installing dos2unix..."
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
-        apt-get install -y dos2unix
+        apt-get install -y dos2unix wget curl
     elif command -v dnf &>/dev/null; then
-        dnf install -y dos2unix
+        dnf install -y dos2unix wget curl
     elif command -v yum &>/dev/null; then
-        yum install -y dos2unix
+        yum install -y dos2unix wget curl
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm dos2unix
+        pacman -Sy --noconfirm dos2unix wget curl
     elif command -v zypper &>/dev/null; then
-        zypper install -y dos2unix
+        zypper install -y dos2unix wget curl
     elif command -v brew &>/dev/null; then
-        brew install dos2unix
+        brew install dos2unix wget curl
     else
         echo "Warning: Could not detect package manager. Please install dos2unix manually."
         echo "Continuing without dos2unix conversion..."
