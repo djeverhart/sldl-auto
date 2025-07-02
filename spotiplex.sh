@@ -42,7 +42,8 @@ install_dependencies() {
     echo "Package manager not detected, please install python3, pip, wget, unzip manually"
     exit 1
   fi
-  python3 -m pip install --break-system-packages spotipy
+  # Install Python packages - spotipy for playlist management, eyed3 for tagging
+  python3 -m pip install --break-system-packages spotipy eyed3
 }
 
 download_sldl() {
@@ -180,7 +181,8 @@ EOF
   fi
 }
 
-# Process completed playlist folder
+# Process completed playlist folder - simplified version using index data
+# Process completed playlist folder - simplified version using index data
 process_completed_playlist() {
   local playlist_dir="$1"
   local index_file="$playlist_dir/_index.sldl"
@@ -189,69 +191,165 @@ process_completed_playlist() {
 
   [[ ! -f "$index_file" ]] && { echo "No index file at $index_file, skipping"; return; }
 
-  local temp_index
-  temp_index=$(mktemp)
+  # Create a temporary Python script
+  local temp_script=$(mktemp "$TMPDIR/spotiplex_process_XXXXXX.py")
 
-  python3 - "$index_file" "$playlist_dir" "$temp_index" <<'EOF'
+  cat > "$temp_script" <<'PYTHONSCRIPT'
 import sys
-import csv
 import os
+import csv
 import shutil
 
+# Enable debugging in debug mode
+DEBUG = os.environ.get('DEBUG_MODE', '0') == '1'
+
+def debug(msg):
+    if DEBUG:
+        print(f"[PYTAG] {msg}", file=sys.stderr, flush=True)
+
+debug("Script started")
+
+# Import eyed3 for tagging
+try:
+    import eyed3
+    eyed3.log.setLevel("ERROR")
+    debug("eyed3 imported successfully")
+    tagging_available = True
+except ImportError as e:
+    print(f"[WARNING] eyed3 not available, skipping tagging: {e}", file=sys.stderr)
+    tagging_available = False
+
+# Get arguments
 index_path = sys.argv[1]
 playlist_dir = sys.argv[2]
-temp_index_path = sys.argv[3]
 
-with open(index_path, newline='', encoding='utf-8') as f_in, open(temp_index_path, 'w', newline='', encoding='utf-8') as f_out:
-    reader = csv.reader(f_in)
+def sanitize(s):
+    return ''.join(c for c in s if c not in '/\\?*:"<>|').strip(' .')
+
+# Read index
+debug(f"Reading index from {index_path}")
+with open(index_path, newline='', encoding='utf-8') as f:
+    reader = csv.reader(f)
+    rows = list(reader)
+
+header = rows[0]
+data_rows = rows[1:]
+
+updated_rows = [header]
+files_processed = 0
+files_renamed = 0
+files_tagged = 0
+
+debug(f"Processing {len(data_rows)} files")
+
+for row in data_rows:
+    if len(row) < 8:
+        updated_rows.append(row)
+        continue
+    
+    filepath, artist, album, title, length, tracktype, state, failurereason = row
+
+    if not filepath.strip():
+        print(f"[-] Skipping empty filepath: artist='{artist}', title='{title}'")
+        updated_rows.append(row)
+        continue
+
+    files_processed += 1
+    original_path = os.path.join(playlist_dir, filepath.strip('./\\'))
+
+    if not os.path.isfile(original_path):
+        debug(f"File not found: {original_path}")
+        updated_rows.append(row)
+        continue
+
+    # Sanitize new filename
+    new_name = f"{sanitize(artist)} - {sanitize(title)}"
+    ext = os.path.splitext(filepath)[1]
+    new_filename = new_name + ext
+    new_path = os.path.join(playlist_dir, new_filename)
+
+    # Rename file if needed
+    if os.path.abspath(original_path) != os.path.abspath(new_path):
+        print(f"[-] Renaming '{os.path.basename(original_path)}' → '{new_filename}'")
+        try:
+            shutil.move(original_path, new_path)
+            files_renamed += 1
+        except Exception as e:
+            debug(f"Rename failed: {e}")
+            updated_rows.append(row)
+            continue
+
+    # Tag file using data from index
+    if tagging_available:
+        debug(f"Tagging file: {new_filename}")
+        debug(f"  From index - Artist: {artist}, Album: {album}, Title: {title}")
+        
+        try:
+            audiofile = eyed3.load(new_path)
+            
+            if audiofile is None:
+                debug(f"eyed3 couldn't load: {new_path}")
+            else:
+                if audiofile.tag is None:
+                    debug(f"Initializing new tag")
+                    audiofile.initTag()
+                
+                # Clear ALL existing tags first to ensure clean metadata
+                if audiofile.tag:
+                    # Set our clean metadata from index
+                    audiofile.tag.artist = artist
+                    audiofile.tag.title = title
+                    audiofile.tag.album = album
+                    
+                    # Clear fields that might have junk data
+                    audiofile.tag.album_artist = None
+                    audiofile.tag.genre = None
+                    audiofile.tag.disc_num = None
+                    
+                    # Remove all comments (correct way for eyed3)
+                    for comment in list(audiofile.tag.comments):
+                        audiofile.tag.comments.remove(comment.description)
+                    
+                    # Clear all user text frames (often contain junk)
+                    for frame in list(audiofile.tag.user_text_frames):
+                        audiofile.tag.user_text_frames.remove(frame.description)
+                    
+                    # Save the clean tags
+                    audiofile.tag.save(version=eyed3.id3.ID3_V2_3)
+                    debug(f"  ✓ Tags saved: {artist} - {title} [Album: {album}]")
+                    files_tagged += 1
+                    
+        except Exception as e:
+            debug(f"Tagging failed: {type(e).__name__}: {str(e)}")
+            import traceback
+            if DEBUG:
+                traceback.print_exc(file=sys.stderr)
+    else:
+        debug("Skipping tagging - eyed3 not available")
+
+    # Write row to updated index (with same data, just new filename)
+    updated_rows.append([new_filename, artist, album, title, length, tracktype, state, failurereason])
+
+debug(f"Summary - Processed: {files_processed}, Renamed: {files_renamed}, Tagged: {files_tagged}")
+
+# Rewrite index file with updated filenames
+with open(index_path, 'w', newline='', encoding='utf-8') as f_out:
     writer = csv.writer(f_out)
+    writer.writerows(updated_rows)
 
-    header = next(reader)
-    writer.writerow(header)
+debug("Index file updated")
+debug("Script completed")
+PYTHONSCRIPT
 
-    for row in reader:
-        if not row or len(row) < 8:
-            continue
-        filepath, artist, album, title, length, tracktype, state, failurereason = row
+  # Execute the Python script
+  echo "[$(date '+%F %T')] Running rename and tagging script..."
+  python3 "$temp_script" "$index_file" "$playlist_dir" 2>&1
 
-        if not filepath.strip():
-            print(f"[{sys.argv[0]}] Skipping empty filepath: artist='{artist}', title='{title}'")
-            writer.writerow([''] + row[1:])
-            continue
+  # Clean up
+  rm -f "$temp_script"
 
-        original_path = os.path.join(playlist_dir, filepath.strip('./\\'))
-
-        if not os.path.isfile(original_path):
-            print(f"[{sys.argv[0]}] File missing: {original_path}")
-            writer.writerow(row)
-            continue
-
-        def sanitize(s):
-            return ''.join(c for c in s if c not in '/\\?*:\"<>|').strip(' .')
-
-        new_name = f"{sanitize(artist)} - {sanitize(title)}"
-        ext = os.path.splitext(filepath)[1]
-        new_filename = new_name + ext
-        new_path = os.path.join(playlist_dir, new_filename)
-
-        if os.path.abspath(original_path) != os.path.abspath(new_path):
-            print(f"[{sys.argv[0]}] Renaming '{os.path.basename(original_path)}' → '{new_filename}'")
-            try:
-                shutil.move(original_path, new_path)
-            except Exception as e:
-                print(f"[{sys.argv[0]}] Rename failed: {e}")
-                writer.writerow(row)
-                continue
-
-        # If any field contains a comma, csv will quote it correctly
-        writer.writerow([new_filename, artist, album, title, length, tracktype, state, failurereason])
-EOF
-
-  mv "$temp_index" "$index_file"
-  echo "[$(date '+%F %T')] Completed rename and index rewrite."
+  echo "[$(date '+%F %T')] Completed rename, tagging and index rewrite."
 }
-
-
 
 # Build sldl command with banned users
 build_sldl_command() {
@@ -350,9 +448,9 @@ main_loop() {
   PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
 
   cat > "$PYTHON_TMP" <<EOF
-import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+import os
 
 auth = SpotifyOAuth(
     client_id="$SPOTIFY_ID",
@@ -403,14 +501,16 @@ EOF
 
   python3 "$PYTHON_TMP"
 
+  # Process all playlists in background
   (
     while IFS= read -r playlist_url; do
       playlist_url=$(echo "$playlist_url" | xargs)
       [[ -z "$playlist_url" ]] && continue
-
+      
       echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
       echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
 
+      # Get playlist name from Spotify API first
       local playlist_name=$(get_playlist_info "$playlist_url")
       if [[ -z "$playlist_name" ]]; then
         echo "[$(date '+%F %T')] Warning: Could not get playlist name from Spotify API" >> "$LOGFILE"
@@ -418,23 +518,39 @@ EOF
         echo "[$(date '+%F %T')] Playlist name: $playlist_name" >> "$LOGFILE"
       fi
 
+      # Build command with current ban list
       build_sldl_command
+      
+      # Start the download process
       "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
       local sldl_pid=$!
 
+      # Start monitoring in background
       monitor_and_restart "$LOGFILE" "$playlist_url" &
       local monitor_pid=$!
+      
+      # Clean up monitor when sldl finishes
       trap "kill $monitor_pid 2>/dev/null || true" EXIT
 
-      while kill -0 $sldl_pid 2>/dev/null; do sleep 3; done
+      # Wait for sldl to complete
+      while kill -0 $sldl_pid 2>/dev/null; do
+        sleep 3
+      done
+
+      # Kill the monitor for this playlist
       kill $monitor_pid 2>/dev/null || true
 
       echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
-
+      
+      # Process the completed playlist folder for file renaming and tagging
       local playlist_folder=""
+      
+      # Try multiple methods to find the playlist folder
+      # Method 1: Use the playlist name we got from Spotify API
       if [[ -n "$playlist_name" ]]; then
         playlist_folder="$DL_PATH/$playlist_name"
         if [[ ! -d "$playlist_folder" ]]; then
+          # Try without sanitization in case sldl uses the raw name
           local playlist_id="${playlist_url##*/}"
           playlist_id="${playlist_id%%\?*}"
           local raw_name=$(python3 -c "
@@ -451,18 +567,20 @@ except: pass
           fi
         fi
       fi
-
+      
+      # Method 2: Look for the most recently modified directory in DL_PATH
       if [[ ! -d "$playlist_folder" ]]; then
         playlist_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
       fi
-
+      
+      # Method 3: Try to extract from sldl log output
       if [[ ! -d "$playlist_folder" ]]; then
         local extracted_name=$(extract_playlist_name_from_log)
         if [[ -n "$extracted_name" ]]; then
           playlist_folder="$DL_PATH/$extracted_name"
         fi
       fi
-
+      
       if [[ -n "$playlist_folder" && -d "$playlist_folder" ]]; then
         echo "[$(date '+%F %T')] Processing playlist folder: $playlist_folder" >> "$LOGFILE"
         process_completed_playlist "$playlist_folder"
@@ -478,10 +596,10 @@ except: pass
     echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
   ) &
 
+  # Start tailing the log file in the foreground
   echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
   tail -f "$LOGFILE"
 }
-
 
 # Debug mode for testing single playlist
 debug_single_playlist() {
@@ -630,12 +748,13 @@ debug_single_playlist() {
   echo ""
   echo "[DEBUG] Looking for folders modified in last 10 minutes:"
   find "$DL_PATH" -maxdepth 1 -type d -mmin -10 -not -path "$DL_PATH" -exec ls -ld {} \; 2>/dev/null || echo "[DEBUG] No recently modified folders"
-  recent_files=$(find "$found_folder" -maxdepth 1 -type f -mmin -10 -print | wc -l 2>/dev/null || echo 0)
-  # If we found a folder, test renaming
+  
+  # If we found a folder, test renaming and tagging
   if [[ -n "$found_folder" && -d "$found_folder" ]]; then
     echo ""
     echo "[DEBUG] Found folder: $found_folder"
     
+    recent_files=$(find "$found_folder" -maxdepth 1 -type f -mmin -10 -print | wc -l 2>/dev/null || echo 0)
     if [[ $recent_files -eq 0 ]]; then
       echo "[DEBUG] WARNING: This folder has no recently modified files!"
       echo "[DEBUG] This might be the wrong folder."
@@ -660,16 +779,45 @@ debug_single_playlist() {
     fi
     
     echo ""
-    echo "[DEBUG] Running rename process..."
+    echo "[DEBUG] Running rename and tagging process..."
     echo "========================="
     
-    # Run the rename with extra debug output
+    # Run the rename and tagging with extra debug output
     process_completed_playlist "$found_folder"
     
     echo "========================="
     echo ""
     echo "[DEBUG] Contents after rename:"
     ls -la "$found_folder" | head -10
+    
+    # Check if tags were applied
+    echo ""
+    echo "[DEBUG] Checking tags on first few files:"
+    for file in "$found_folder"/*.mp3; do
+      if [[ -f "$file" ]]; then
+        echo ""
+        echo "File: $(basename "$file")"
+        python3 -c "
+import eyed3
+eyed3.log.setLevel('ERROR')
+try:
+    af = eyed3.load('$file')
+    if af and af.tag:
+        print(f'  Artist: {af.tag.artist}')
+        print(f'  Title: {af.tag.title}')
+        print(f'  Album: {af.tag.album}')
+        print(f'  Track#: {af.tag.track_num[0] if af.tag.track_num else \"None\"}')
+    else:
+        print('  No tags found')
+except Exception as e:
+    print(f'  Error: {e}')
+"
+        # Only check first 3 files
+        if [[ $(find "$found_folder" -name "*.mp3" -print | head -3 | wc -l) -eq 3 ]]; then
+          break
+        fi
+      fi
+    done
     
     echo ""
     echo "[DEBUG] Mismatch Analysis:"
