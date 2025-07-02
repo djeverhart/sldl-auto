@@ -82,27 +82,46 @@ edit_config() {
   options=("Delete config" "Edit in vim" "Cancel")
   select opt in "${options[@]}"; do
     case $opt in
-      "Delete config") rm -f "$CONFIG_FILE"; echo "Config deleted."; exit 0 ;;
-      "Edit in vim") vim "$CONFIG_FILE"; exit 0 ;;
-      "Cancel") exit 0 ;;
-      *) echo "Invalid option." ;;
+      "Delete config")
+        rm -f "$CONFIG_FILE"
+        echo "Config deleted."
+        break  # exit select loop and return to caller
+        ;;
+      "Edit in vim")
+        vim "$CONFIG_FILE"
+        break
+        ;;
+      "Cancel")
+        break
+        ;;
+      *)
+        echo "Invalid option."
+        ;;
     esac
   done
 }
 
+
 check_or_create_config() {
-  if [[ -f "$CONFIG_FILE" ]]; then
-    read -rp "Config file exists. Reuse it? [y/n]: " reuse
-    if [[ "$reuse" =~ ^[Yy]$ ]]; then
-      return
+  while true; do
+    if [[ -f "$CONFIG_FILE" ]]; then
+      read -rp "Config file exists. Reuse it? [y/n]: " reuse
+      if [[ "$reuse" =~ ^[Yy]$ ]]; then
+        return
+      else
+        edit_config
+        # After editing/deleting, re-check if config file exists:
+        if [[ ! -f "$CONFIG_FILE" ]]; then
+          echo "Config file missing, prompting for new config..."
+          prompt_config
+        fi
+      fi
     else
-      edit_config
       prompt_config
     fi
-  else
-    prompt_config
-  fi
+  done
 }
+
 
 kill_existing_instances() {
   echo "Killing other spotiplex.sh instances..."
