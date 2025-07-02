@@ -181,7 +181,29 @@ EOF
   fi
 }
 
-# Process completed playlist folder - simplified version using index data
+generate_m3u_playlist() {
+  local playlist_dir="$1"
+  local playlist_name="$2"
+
+  mkdir -p "$DL_PATH/Playlists"
+  local sanitized_name
+  sanitized_name=$(sanitize_filename "$playlist_name")
+  local m3u_file="$DL_PATH/Playlists/${sanitized_name}.m3u"
+
+  echo "[$(date '+%F %T')] Generating M3U file: $m3u_file" >> "$LOGFILE"
+
+  # Replace this with your actual host music root
+  local host_music_root="$DL_PATH"
+  local container_music_root="/music"
+
+  find "$playlist_dir" -maxdepth 1 -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" \) | sort | while read -r filepath; do
+    # Convert host path to container path
+    container_path="${filepath/#$host_music_root/$container_music_root}"
+    echo "$container_path"
+  done > "$m3u_file"
+}
+
+
 # Process completed playlist folder - simplified version using index data
 process_completed_playlist() {
   local playlist_dir="$1"
@@ -349,6 +371,10 @@ PYTHONSCRIPT
   rm -f "$temp_script"
 
   echo "[$(date '+%F %T')] Completed rename, tagging and index rewrite."
+
+    # Generate M3U playlist for Navidrome
+  echo "[$(date '+%F %T')] Generating M3U for: $playlist_dir"
+  generate_m3u_playlist "$playlist_dir" "$(basename "$playlist_dir")"
 }
 
 # Build sldl command with banned users
