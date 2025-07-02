@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-CONFIG_FILE="$HOME/.spotiplex.conf"
-LOGFILE="spotiplex.log"
+CONFIG_FILE="/pstore/spotiplex.conf"
+LOGFILE="/pstore/spotiplex.log"
 TMPDIR="/tmp"
 SLSL_ZIP_URL="https://github.com/fiso64/slsk-batchdl/releases/latest/download/sldl_linux-x64.zip"
 SLSK_BIN="$TMPDIR/sldl"
@@ -11,7 +11,10 @@ PLAYLISTS_TMP=""
 TIMEOUT_SECONDS=300  # Increased to 5 minutes to match watchdog script
 SCRIPT_PATH="$(realpath "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
-BAN_FILE="banned_users.txt"
+BAN_FILE="/pstore/banned_users.txt"
+
+# Ensure persistent directory exists
+mkdir -p /pstore
 
 # Ensure ban file exists
 [[ -f "$BAN_FILE" ]] || touch "$BAN_FILE"
@@ -42,9 +45,9 @@ install_dependencies() {
     echo "Package manager not detected, please install python3, pip, wget, unzip manually"
     exit 1
   fi
-  # Install Python packages - spotipy for playlist management, eyed3 for tagging
   python3 -m pip install spotipy eyed3
 }
+
 
 download_sldl() {
   echo "[*] Downloading sldl..."
