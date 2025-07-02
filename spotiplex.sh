@@ -43,7 +43,7 @@ install_dependencies() {
     exit 1
   fi
   # Install Python packages - spotipy for playlist management, eyed3 for tagging
-  python3 -m pip install --break-system-packages spotipy eyed3
+  python3 -m pip install spotipy eyed3
 }
 
 download_sldl() {
