@@ -48,7 +48,6 @@ install_dependencies() {
   python3 -m pip install spotipy eyed3
 }
 
-
 download_sldl() {
   echo "[*] Downloading sldl..."
   mkdir -p "$TMPDIR"
@@ -104,7 +103,6 @@ edit_config() {
   done
 }
 
-
 check_or_create_config() {
   while true; do
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -124,7 +122,6 @@ check_or_create_config() {
     fi
   done
 }
-
 
 kill_existing_instances() {
   echo "Killing other spotiplex.sh instances..."
@@ -224,7 +221,6 @@ generate_m3u_playlist() {
     echo "$container_path"
   done > "$m3u_file"
 }
-
 
 # Process completed playlist folder - simplified version using index data
 process_completed_playlist() {
@@ -506,7 +502,7 @@ auth = SpotifyOAuth(
     redirect_uri="$SPOTIFY_REDIRECT",
     scope="playlist-read-private playlist-read-collaborative",
     open_browser=False,
-    cache_path=os.path.expanduser("~/.cache/spotiplex-token"),
+    cache_path="/pstore/spotiplex-token",
     show_dialog=True
 )
 
@@ -975,3 +971,4 @@ else
 
   main_loop
 fi
+
