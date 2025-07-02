@@ -105,7 +105,7 @@ edit_config() {
 check_or_create_config() {
   while true; do
     if [[ -f "$CONFIG_FILE" ]]; then
-      read -rp "Config file exists. Reuse it? [y/n]: " reuse
+      read -rp "Config file exists. Use it? [y/n]: " reuse
       if [[ "$reuse" =~ ^[Yy]$ ]]; then
         return
       else
