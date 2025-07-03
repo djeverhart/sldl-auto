@@ -36,11 +36,11 @@ install_dependencies() {
   echo "[*] Installing dependencies..."
   if command -v apt-get &>/dev/null; then
     apt-get update
-    apt-get install -y python3 python3-pip unzip wget libicu-dev
+    apt-get install -y python3 python3-pip unzip wget libicu-dev procps
   elif command -v dnf &>/dev/null; then
-    dnf install -y python3 python3-pip unzip wget libicu-dev
+    dnf install -y python3 python3-pip unzip wget libicu-dev procps
   elif command -v pacman &>/dev/null; then
-    pacman -Sy --noconfirm python python-pip unzip wget libicu-dev
+    pacman -Sy --noconfirm python python-pip unzip wget libicu-dev procps
   else
     echo "Package manager not detected, please install python3, pip, wget, unzip manually"
     exit 1
