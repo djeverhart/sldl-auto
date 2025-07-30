@@ -8,10 +8,17 @@ SLSL_ZIP_URL="https://github.com/fiso64/slsk-batchdl/releases/latest/download/sl
 SLSK_BIN="$TMPDIR/sldl"
 PYTHON_TMP=""
 PLAYLISTS_TMP=""
-TIMEOUT_SECONDS=300  # Increased to 5 minutes to match watchdog script
+ARTISTS_TMP=""
+TIMEOUT_SECONDS=300
 SCRIPT_PATH="$(realpath "$0")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 BAN_FILE="/pstore/banned_users.txt"
+DISCOGRAPHY_FILE="/pstore/discography_albums.txt"
+
+# Download modes
+MODE_PLAYLISTS="playlists"
+MODE_DISCOGRAPHY_ALL="discography_all"
+MODE_DISCOGRAPHY_SELECTED="discography_selected"
 
 # Ensure persistent directory exists
 mkdir -p /pstore
@@ -25,6 +32,7 @@ readarray -t BANNED_USERS < <(grep -v '^#' "$BAN_FILE" | grep -v '^$')
 cleanup() {
   [[ -n "$PYTHON_TMP" ]] && rm -f "$PYTHON_TMP"
   [[ -n "$PLAYLISTS_TMP" ]] && rm -f "$PLAYLISTS_TMP"
+  [[ -n "$ARTISTS_TMP" ]] && rm -f "$ARTISTS_TMP"
 }
 trap cleanup EXIT
 
@@ -32,20 +40,142 @@ print_header() {
   echo -e "\n========================[ Run started at $(date '+%F %T') ]========================\n" >> "$LOGFILE"
 }
 
+install_gum() {
+  echo "[*] Installing gum..."
+  
+  # Check if gum is already installed
+  if command -v gum &>/dev/null; then
+    echo "[*] gum is already installed"
+    return 0
+  fi
+  
+  # Detect OS and architecture
+  local os=""
+  local arch=""
+  
+  case "$(uname -s)" in
+    Linux*)   os="Linux" ;;
+    Darwin*)  os="Darwin" ;;
+    *)        echo "Unsupported OS for gum auto-install"; return 1 ;;
+  esac
+  
+  case "$(uname -m)" in
+    x86_64)   arch="x86_64" ;;
+    aarch64)  arch="arm64" ;;
+    arm64)    arch="arm64" ;;
+    *)        echo "Unsupported architecture for gum auto-install"; return 1 ;;
+  esac
+  
+  local gum_version="0.16.2"
+  local gum_filename="gum_${gum_version}_${os}_${arch}.tar.gz"
+  local gum_url="https://github.com/charmbracelet/gum/releases/download/v${gum_version}/${gum_filename}"
+  local gum_dir="/tmp/gum_install"
+  local original_dir="$(pwd)"
+  
+  echo "[*] Downloading gum for ${os}_${arch} from: $gum_url"
+  
+  # Create temporary directory
+  mkdir -p "$gum_dir"
+  cd "$gum_dir"
+  if [[ $? -ne 0 ]]; then
+    echo "Failed to cd to gum_dir"
+    return 1
+  fi
+  
+  # Download and extract gum
+  if command -v wget &>/dev/null; then
+    wget -q "$gum_url" -O "$gum_filename"
+  elif command -v curl &>/dev/null; then
+    curl -sL "$gum_url" -o "$gum_filename"
+  else
+    echo "Error: Neither wget nor curl found"
+    cd "$original_dir"
+    return 1
+  fi
+  
+  if [[ ! -f "$gum_filename" ]]; then
+    echo "Error: Failed to download gum"
+    cd "$original_dir"
+    return 1
+  fi
+  
+  # Extract and install
+  tar -xzf "$gum_filename"
+  
+  # Find the gum binary - check common locations
+  local gum_binary=""
+  if [[ -f "gum" ]]; then
+    gum_binary="gum"
+  else
+    # Look for gum in any subdirectory
+    gum_binary=$(find . -name "gum" -type f 2>/dev/null | head -1)
+  fi
+  
+  if [[ -z "$gum_binary" ]] || [[ ! -f "$gum_binary" ]]; then
+    echo "Error: Could not find gum binary in extracted files"
+    echo "Available files:"
+    ls -la
+    cd "$original_dir"
+    return 1
+  fi
+  
+  # Install to /usr/local/bin
+  chmod +x "$gum_binary"
+  
+  # Ensure /usr/local/bin exists
+  if [[ ! -d "/usr/local/bin" ]]; then
+    if command -v sudo &>/dev/null && [[ $EUID -ne 0 ]]; then
+      sudo mkdir -p /usr/local/bin
+    else
+      mkdir -p /usr/local/bin
+    fi
+  fi
+  
+  if command -v sudo &>/dev/null && [[ $EUID -ne 0 ]]; then
+    sudo cp "$gum_binary" /usr/local/bin/gum
+  else
+    cp "$gum_binary" /usr/local/bin/gum
+  fi
+  
+  # Cleanup
+  cd "$original_dir"
+  rm -rf "$gum_dir"
+  
+  # Add /usr/local/bin to PATH if it's not already there
+  if [[ ":$PATH:" != *":/usr/local/bin:"* ]]; then
+    export PATH="/usr/local/bin:$PATH"
+  fi
+  
+  # Verify installation
+  if command -v gum &>/dev/null; then
+    echo "[*] gum installed successfully"
+    return 0
+  else
+    echo "Error: gum installation failed"
+    return 1
+  fi
+}
+
 install_dependencies() {
   echo "[*] Installing dependencies..."
   if command -v apt-get &>/dev/null; then
     apt-get update
-    apt-get install -y python3 python3-pip unzip wget libicu-dev procps
+    apt-get install -y python3 python3-pip unzip wget libicu-dev procps curl tar
   elif command -v dnf &>/dev/null; then
-    dnf install -y python3 python3-pip unzip wget libicu-dev procps
+    dnf install -y python3 python3-pip unzip wget libicu-dev procps curl tar
   elif command -v pacman &>/dev/null; then
-    pacman -Sy --noconfirm python python-pip unzip wget libicu-dev procps
+    pacman -Sy --noconfirm python python-pip unzip wget libicu-dev procps curl tar
   else
     echo "Package manager not detected, please install python3, pip, wget, unzip manually"
     exit 1
   fi
-  python3 -m pip install spotipy eyed3
+  
+  # Install gum manually
+  if ! install_gum; then
+    echo "[*] Warning: gum installation failed, basic prompts will be used"
+  fi
+  
+  python3 -m pip install spotipy eyed3 requests
 }
 
 download_sldl() {
@@ -67,7 +197,54 @@ prompt_config() {
   SPOTIFY_REDIRECT=${SPOTIFY_REDIRECT:-https://127.0.0.1:8887/callback}
   read -rp "Download path [/downloads/playlists]: " DL_PATH
   DL_PATH=${DL_PATH:-/downloads/playlists}
+  
+  echo ""
+  echo "Additional configuration:"
+  read -rp "Email for MusicBrainz API: " MB_EMAIL
+  
+  echo ""
+  echo "Choose download mode:"
+  
+  # Ask for download mode using gum if available, otherwise use basic prompt
+  if command -v gum &>/dev/null; then
+    echo "Using interactive selection (gum)..."
+    DOWNLOAD_MODE=$(gum choose \
+      "playlists" \
+      "discography_all" \
+      "discography_selected" \
+      --header "Select download mode:" \
+      --height 8)
+    
+    # Show what was selected
+    case "$DOWNLOAD_MODE" in
+      "playlists") echo "Selected: Download individual playlists (current behavior)" ;;
+      "discography_all") echo "Selected: Download full discographies of all artists from all playlists" ;;
+      "discography_selected") echo "Selected: Download discographies from selected playlists only" ;;
+    esac
+  else
+    echo "gum not available, using basic selection..."
+    echo "1) playlists - Download individual playlists (current behavior)"
+    echo "2) discography_all - Download full discographies of all artists from all playlists"
+    echo "3) discography_selected - Download discographies from selected playlists only"
+    while true; do
+      read -rp "Enter choice [1-3]: " choice
+      case $choice in
+        1) DOWNLOAD_MODE="playlists"; break ;;
+        2) DOWNLOAD_MODE="discography_all"; break ;;
+        3) DOWNLOAD_MODE="discography_selected"; break ;;
+        *) echo "Invalid choice, please enter 1, 2, or 3." ;;
+      esac
+    done
+  fi
 
+  echo ""
+  echo "Configuration summary:"
+  echo "  Soulseek user: $SL_USERNAME"
+  echo "  Download path: $DL_PATH"
+  echo "  MusicBrainz email: $MB_EMAIL"
+  echo "  Download mode: $DOWNLOAD_MODE"
+  echo ""
+  
   cat > "$CONFIG_FILE" <<EOF
 SL_USERNAME=$(printf '%q' "$SL_USERNAME")
 SL_PASSWORD=$(printf '%q' "$SL_PASSWORD")
@@ -75,6 +252,8 @@ SPOTIFY_ID=$(printf '%q' "$SPOTIFY_ID")
 SPOTIFY_SECRET=$(printf '%q' "$SPOTIFY_SECRET")
 SPOTIFY_REDIRECT=$(printf '%q' "$SPOTIFY_REDIRECT")
 DL_PATH=$(printf '%q' "$DL_PATH")
+MB_EMAIL=$(printf '%q' "$MB_EMAIL")
+DOWNLOAD_MODE=$(printf '%q' "$DOWNLOAD_MODE")
 EOF
   echo "Config saved to $CONFIG_FILE"
 }
@@ -87,7 +266,7 @@ edit_config() {
       "Delete config")
         rm -f "$CONFIG_FILE"
         echo "Config deleted."
-        break  # exit select loop and return to caller
+        break
         ;;
       "Edit in vim")
         vim "$CONFIG_FILE"
@@ -111,7 +290,6 @@ check_or_create_config() {
         return
       else
         edit_config
-        # After editing/deleting, re-check if config file exists:
         if [[ ! -f "$CONFIG_FILE" ]]; then
           echo "Config file missing, prompting for new config..."
           prompt_config
@@ -131,21 +309,17 @@ kill_existing_instances() {
     kill $pids 2>/dev/null || true
   fi
   
-  # Also kill any existing sldl processes
   pkill -f "$SLSK_BIN" 2>/dev/null || true
 }
 
-# Extract the last uploader from log (adapted from watchdog script)
 extract_last_uploader() {
   grep -oP 'Initialize:\s+\K[^\\]+' "$LOGFILE" | tail -n 1
 }
 
-# Sanitize filename by removing/replacing problematic characters
 sanitize_filename() {
   local name="$1"
   python3 -c "
 name = '''$name'''
-# Replace problematic characters
 name = name.replace('/', '-').replace('\\\\', '-')
 for ch in ['?', '*', ':', '\"', '<', '>', '|']:
     name = name.replace(ch, '')
@@ -154,22 +328,10 @@ print(name)
 "
 }
 
-# Extract playlist name from sldl output
-extract_playlist_name_from_log() {
-  local playlist_line=$(grep -E "(Downloading playlist:|Processing playlist:|Album:|Playlist:)" "$LOGFILE" | tail -n 1)
-  if [[ -n "$playlist_line" ]]; then
-    local name=$(echo "$playlist_line" | sed -E 's/.*(Downloading playlist:|Processing playlist:|Album:|Playlist:)\s*//g' | sed 's/[[:space:]]*$//')
-    echo "$name"
-  else
-    echo ""
-  fi
-}
-
-# Get playlist info from Spotify API
 get_playlist_info() {
   local playlist_url="$1"
   local playlist_id="${playlist_url##*/}"
-  playlist_id="${playlist_id%%\?*}"  # Remove query params if any
+  playlist_id="${playlist_id%%\?*}"
 
   local py_tmp=$(mktemp "$TMPDIR/spotiplex_info_XXXXXX.py")
 
@@ -200,6 +362,242 @@ EOF
   fi
 }
 
+# Get all unique artists from playlists
+get_unique_artists() {
+  local selected_playlists="$1"
+  ARTISTS_TMP=$(mktemp "$TMPDIR/spotiplex_artists_XXXXXX.py")
+
+  cat > "$ARTISTS_TMP" <<EOF
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+import sys
+
+auth = SpotifyOAuth(
+    client_id="$SPOTIFY_ID",
+    client_secret="$SPOTIFY_SECRET",
+    redirect_uri="$SPOTIFY_REDIRECT",
+    scope="playlist-read-private playlist-read-collaborative",
+    open_browser=False,
+    cache_path="/pstore/spotiplex-token",
+    show_dialog=False
+)
+
+token_info = auth.get_cached_token()
+if not token_info:
+    print("Error: No cached token found", file=sys.stderr)
+    sys.exit(1)
+
+sp = spotipy.Spotify(auth=token_info["access_token"])
+artist_names = set()
+
+# Read selected playlist URLs if provided
+selected_urls = set()
+if "$selected_playlists":
+    with open("$selected_playlists", "r") as f:
+        selected_urls = {line.strip() for line in f if line.strip()}
+
+offset = 0
+while True:
+    playlists = sp.current_user_playlists(limit=50, offset=offset)["items"]
+    if not playlists:
+        break
+    
+    for playlist in playlists:
+        playlist_url = playlist["external_urls"]["spotify"]
+        
+        # If we have selected playlists, only process those
+        if selected_urls and playlist_url not in selected_urls:
+            continue
+            
+        print(f"Processing playlist: {playlist['name']}", file=sys.stderr)
+        
+        # Get all tracks from this playlist
+        results = sp.playlist_tracks(playlist["id"])
+        while results:
+            for item in results["items"]:
+                track = item.get("track")
+                if track and track.get("artists"):
+                    for artist in track["artists"]:
+                        artist_names.add(artist["name"])
+            results = sp.next(results) if results["next"] else None
+    
+    offset += 50
+
+# Output unique artists
+for artist in sorted(artist_names):
+    print(artist)
+EOF
+
+  python3 "$ARTISTS_TMP"
+  rm -f "$ARTISTS_TMP"
+}
+
+# Generate discography with individual tracks using MusicBrainz API
+generate_discography() {
+  local artists_file="$1"
+  
+  echo "[$(date '+%F %T')] Generating discography with individual tracks from artists..." >> "$LOGFILE"
+  
+  local py_script=$(mktemp "$TMPDIR/spotiplex_discography_XXXXXX.py")
+  
+  cat > "$py_script" <<EOF
+import requests
+import time
+import sys
+import os
+
+MB_API = "https://musicbrainz.org/ws/2"
+SLEEP_TIME = 1.2  # Increased for more API calls
+HEADERS = {
+    "User-Agent": f"Spotiplex/1.0 ($MB_EMAIL)"
+}
+SKIP_KEYWORDS = [
+    "compilation", "greatest hits", "anthology", "essentials",
+    "live", "remix", "remixes", "versions", "rarities", "b-sides", 
+    "instrumental", "compilations", "essential", "karaoke"
+]
+
+def get_musicbrainz_id(artist_name):
+    print(f"Looking up MBID for: {artist_name}", file=sys.stderr)
+    time.sleep(SLEEP_TIME)
+    url = f"{MB_API}/artist/?query=artist:{requests.utils.quote(artist_name)}&fmt=json"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data['artists']:
+                result = data['artists'][0]
+                mbid = result['id']
+                print(f"Found MBID: {mbid}", file=sys.stderr)
+                return mbid
+        else:
+            print(f"Failed to get MBID: {r.status_code}", file=sys.stderr)
+    except Exception as e:
+        print(f"MBID lookup failed: {e}", file=sys.stderr)
+    return None
+
+def get_albums_for_artist(artist_name, mbid):
+    print(f"Fetching albums for: {artist_name}", file=sys.stderr)
+    albums = []
+    params = {
+        "artist": mbid,
+        "type": "album|ep",
+        "fmt": "json",
+        "limit": 100
+    }
+    try:
+        r = requests.get(f"{MB_API}/release-group", params=params, headers=HEADERS)
+        if r.ok:
+            release_groups = r.json().get("release-groups", [])
+            for rg in release_groups:
+                title = rg.get("title", "").strip()
+                if not title:
+                    continue
+                lowered = title.lower()
+                if any(keyword in lowered for keyword in SKIP_KEYWORDS):
+                    continue
+                albums.append({
+                    'title': title,
+                    'id': rg.get('id')
+                })
+            time.sleep(SLEEP_TIME)
+    except Exception as e:
+        print(f"Album fetch failed: {e}", file=sys.stderr)
+    return albums
+
+def get_tracks_for_album(artist_name, album_title, release_group_id):
+    print(f"Fetching tracks for: {artist_name} - {album_title}", file=sys.stderr)
+    tracks = []
+    
+    # Get releases for this release group
+    params = {
+        "release-group": release_group_id,
+        "fmt": "json",
+        "limit": 25
+    }
+    
+    try:
+        r = requests.get(f"{MB_API}/release", params=params, headers=HEADERS)
+        time.sleep(SLEEP_TIME)
+        
+        if r.ok:
+            releases = r.json().get("releases", [])
+            if not releases:
+                return tracks
+            
+            # Use the first release to get track listing
+            release_id = releases[0]['id']
+            
+            # Get track listing
+            track_params = {
+                "inc": "recordings",
+                "fmt": "json"
+            }
+            
+            track_r = requests.get(f"{MB_API}/release/{release_id}", params=track_params, headers=HEADERS)
+            time.sleep(SLEEP_TIME)
+            
+            if track_r.ok:
+                release_data = track_r.json()
+                media_list = release_data.get("media", [])
+                
+                for media in media_list:
+                    track_list = media.get("tracks", [])
+                    for track in track_list:
+                        track_title = track.get("title", "").strip()
+                        if track_title:
+                            tracks.append(track_title)
+                            
+        print(f"Found {len(tracks)} tracks for {album_title}", file=sys.stderr)
+        
+    except Exception as e:
+        print(f"Track fetch failed for {album_title}: {e}", file=sys.stderr)
+    
+    return tracks
+
+# Read artists from file
+with open("$artists_file", "r") as f:
+    artists = [line.strip() for line in f if line.strip()]
+
+output_lines = []
+total_tracks = 0
+
+for artist in artists:
+    print(f"Processing artist: {artist}", file=sys.stderr)
+    mbid = get_musicbrainz_id(artist)
+    if not mbid:
+        continue
+    
+    albums = get_albums_for_artist(artist, mbid)
+    print(f"Found {len(albums)} albums for {artist}", file=sys.stderr)
+    
+    for album in albums:
+        album_title = album['title']
+        album_id = album['id']
+        
+        # Get individual tracks for this album
+        tracks = get_tracks_for_album(artist, album_title, album_id)
+        
+        for track_title in tracks:
+            # Format for sldl with individual track search
+            line = f'artist="{artist}",album="{album_title}",title="{track_title}"'
+            output_lines.append(line)
+            total_tracks += 1
+            
+            if total_tracks % 10 == 0:
+                print(f"Generated {total_tracks} tracks so far...", file=sys.stderr)
+
+print(f"Total tracks generated: {total_tracks}", file=sys.stderr)
+
+# Output all tracks
+for line in output_lines:
+    print(line)
+EOF
+
+  python3 "$py_script" "$artists_file"
+  rm -f "$py_script"
+}
+
 generate_m3u_playlist() {
   local playlist_dir="$1"
   local playlist_name="$2"
@@ -211,18 +609,49 @@ generate_m3u_playlist() {
 
   echo "[$(date '+%F %T')] Generating M3U file: $m3u_file" >> "$LOGFILE"
 
-  # Replace this with your actual host music root
   local host_music_root="$DL_PATH"
   local container_music_root="/music"
 
-  find "$playlist_dir" -maxdepth 1 -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" \) | sort | while read -r filepath; do
-    # Convert host path to container path
+  find "$playlist_dir" -maxdepth 2 -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" \) | sort | while read -r filepath; do
     container_path="${filepath/#$host_music_root/$container_music_root}"
     echo "$container_path"
   done > "$m3u_file"
 }
 
-# Process completed playlist folder - simplified version using index data
+# Generate playlist M3U files that reference centralized artist folders
+generate_playlist_m3u_from_tracks() {
+  local playlist_name="$1"
+  local tracks_info="$2"  # File containing track info (artist, title)
+  
+  mkdir -p "$DL_PATH/Playlists"
+  local sanitized_name
+  sanitized_name=$(sanitize_filename "$playlist_name")
+  local m3u_file="$DL_PATH/Playlists/${sanitized_name}.m3u"
+
+  echo "[$(date '+%F %T')] Generating M3U file from tracks: $m3u_file" >> "$LOGFILE"
+
+  local host_music_root="$DL_PATH"
+  local container_music_root="/music"
+
+  # Read track info and find corresponding files in artist folders
+  while IFS='|' read -r artist title; do
+    # Look for the track in the artist's folder
+    local artist_folder="$DL_PATH/Artists/$(sanitize_filename "$artist")"
+    if [[ -d "$artist_folder" ]]; then
+      # Find files that match this track
+      find "$artist_folder" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" \) | while read -r filepath; do
+        local filename=$(basename "$filepath")
+        # Check if this file matches the track (basic matching)
+        if [[ "$filename" == *"$title"* ]] || [[ "$filename" == *"$(sanitize_filename "$title")"* ]]; then
+          container_path="${filepath/#$host_music_root/$container_music_root}"
+          echo "$container_path"
+          break  # Only add the first match
+        fi
+      done
+    fi
+  done < "$tracks_info" > "$m3u_file"
+}
+
 process_completed_playlist() {
   local playlist_dir="$1"
   local index_file="$playlist_dir/_index.sldl"
@@ -231,7 +660,7 @@ process_completed_playlist() {
 
   [[ ! -f "$index_file" ]] && { echo "No index file at $index_file, skipping"; return; }
 
-  # Create a temporary Python script
+  # Same processing script as before, but adapted for new structure
   local temp_script=$(mktemp "$TMPDIR/spotiplex_process_XXXXXX.py")
 
   cat > "$temp_script" <<'PYTHONSCRIPT'
@@ -249,7 +678,6 @@ def debug(msg):
 
 debug("Script started")
 
-# Import eyed3 for tagging
 try:
     import eyed3
     eyed3.log.setLevel("ERROR")
@@ -259,14 +687,12 @@ except ImportError as e:
     print(f"[WARNING] eyed3 not available, skipping tagging: {e}", file=sys.stderr)
     tagging_available = False
 
-# Get arguments
 index_path = sys.argv[1]
 playlist_dir = sys.argv[2]
 
 def sanitize(s):
     return ''.join(c for c in s if c not in '/\\?*:"<>|').strip(' .')
 
-# Read index
 debug(f"Reading index from {index_path}")
 with open(index_path, newline='', encoding='utf-8') as f:
     reader = csv.reader(f)
@@ -302,13 +728,11 @@ for row in data_rows:
         updated_rows.append(row)
         continue
 
-    # Sanitize new filename
     new_name = f"{sanitize(artist)} - {sanitize(title)}"
     ext = os.path.splitext(filepath)[1]
     new_filename = new_name + ext
     new_path = os.path.join(playlist_dir, new_filename)
 
-    # Rename file if needed
     if os.path.abspath(original_path) != os.path.abspath(new_path):
         print(f"[-] Renaming '{os.path.basename(original_path)}' → '{new_filename}'")
         try:
@@ -319,7 +743,6 @@ for row in data_rows:
             updated_rows.append(row)
             continue
 
-    # Tag file using data from index
     if tagging_available:
         debug(f"Tagging file: {new_filename}")
         debug(f"  From index - Artist: {artist}, Album: {album}, Title: {title}")
@@ -334,45 +757,34 @@ for row in data_rows:
                     debug(f"Initializing new tag")
                     audiofile.initTag()
                 
-                # Clear ALL existing tags first to ensure clean metadata
                 if audiofile.tag:
-                    # Set our clean metadata from index
                     audiofile.tag.artist = artist
                     audiofile.tag.title = title
                     audiofile.tag.album = album
                     
-                    # Clear fields that might have junk data
                     audiofile.tag.album_artist = None
                     audiofile.tag.genre = None
                     audiofile.tag.disc_num = None
                     
-                    # Remove all comments (correct way for eyed3)
                     for comment in list(audiofile.tag.comments):
                         audiofile.tag.comments.remove(comment.description)
                     
-                    # Clear all user text frames (often contain junk)
                     for frame in list(audiofile.tag.user_text_frames):
                         audiofile.tag.user_text_frames.remove(frame.description)
                     
-                    # Save the clean tags
                     audiofile.tag.save(version=eyed3.id3.ID3_V2_3)
                     debug(f"  ✓ Tags saved: {artist} - {title} [Album: {album}]")
                     files_tagged += 1
                     
         except Exception as e:
             debug(f"Tagging failed: {type(e).__name__}: {str(e)}")
-            import traceback
-            if DEBUG:
-                traceback.print_exc(file=sys.stderr)
     else:
         debug("Skipping tagging - eyed3 not available")
 
-    # Write row to updated index (with same data, just new filename)
     updated_rows.append([new_filename, artist, album, title, length, tracktype, state, failurereason])
 
 debug(f"Summary - Processed: {files_processed}, Renamed: {files_renamed}, Tagged: {files_tagged}")
 
-# Rewrite index file with updated filenames
 with open(index_path, 'w', newline='', encoding='utf-8') as f_out:
     writer = csv.writer(f_out)
     writer.writerows(updated_rows)
@@ -381,21 +793,12 @@ debug("Index file updated")
 debug("Script completed")
 PYTHONSCRIPT
 
-  # Execute the Python script
-  echo "[$(date '+%F %T')] Running rename and tagging script..."
   python3 "$temp_script" "$index_file" "$playlist_dir" 2>&1
-
-  # Clean up
   rm -f "$temp_script"
 
   echo "[$(date '+%F %T')] Completed rename, tagging and index rewrite."
-
-    # Generate M3U playlist for Navidrome
-  echo "[$(date '+%F %T')] Generating M3U for: $playlist_dir"
-  generate_m3u_playlist "$playlist_dir" "$(basename "$playlist_dir")"
 }
 
-# Build sldl command with banned users
 build_sldl_command() {
   local base_cmd="$SLSK_BIN"
   local args=(
@@ -418,12 +821,10 @@ build_sldl_command() {
     "--verbose"
   )
   
-  # Add Spotify refresh token if available
   if [[ -n "${SPOTIFY_REFRESH:-}" ]]; then
     args+=("--spotify-refresh" "$SPOTIFY_REFRESH")
   fi
   
-  # Add banned users if any exist
   if [[ ${#BANNED_USERS[@]} -gt 0 ]]; then
     local joined=$(printf "%s," "${BANNED_USERS[@]}")
     joined="${joined%,}"
@@ -435,7 +836,7 @@ build_sldl_command() {
 
 monitor_and_restart() {
   local logfile="$1"
-  local playlist_url="$2"
+  local download_target="$2"
   local last_size=0
   local unchanged_count=0
   local last_line=""
@@ -445,13 +846,11 @@ monitor_and_restart() {
       current_size=$(stat -f%z "$logfile" 2>/dev/null || stat -c%s "$logfile" 2>/dev/null || echo "0")
       new_line=$(tail -n 1 "$logfile" 2>/dev/null || echo "")
       
-      # Check if both size and content are unchanged
       if [[ "$current_size" -eq "$last_size" && "$new_line" == "$last_line" ]]; then
         ((unchanged_count++))
         if [[ $unchanged_count -ge $TIMEOUT_SECONDS ]]; then
           echo -e "\n[$(date '+%F %T')] No output for ${TIMEOUT_SECONDS} seconds, checking for user to ban..." >> "$logfile"
           
-          # Extract last uploader and ban them if appropriate
           uploader=$(extract_last_uploader)
           if [[ -n "$uploader" ]]; then
             if [[ "$uploader" =~ \  ]]; then
@@ -480,14 +879,14 @@ monitor_and_restart() {
         last_line="$new_line"
       fi
     fi
-    sleep 1  # Check every second for responsiveness
+    sleep 1
   done
 }
 
-main_loop() {
-  print_header
-  source "$CONFIG_FILE"
-
+# Main loop for playlist mode (existing behavior)
+playlist_mode() {
+  echo "[$(date '+%F %T')] Running in playlist mode" >> "$LOGFILE"
+  
   PYTHON_TMP=$(mktemp "$TMPDIR/spotiplex_py_XXXXXX.py")
   PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
 
@@ -545,128 +944,509 @@ EOF
 
   python3 "$PYTHON_TMP"
 
-  # Process all playlists in background
-  (
-    while IFS= read -r playlist_url; do
-      playlist_url=$(echo "$playlist_url" | xargs)
-      [[ -z "$playlist_url" ]] && continue
-      
-      echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
-      echo "[$(date '+%F %T')] Currently banned users: ${BANNED_USERS[*]}" >> "$LOGFILE"
+  # Process playlists (existing logic)
+  while IFS= read -r playlist_url; do
+    playlist_url=$(echo "$playlist_url" | xargs)
+    [[ -z "$playlist_url" ]] && continue
+    
+    echo "[$(date '+%F %T')] Starting download for $playlist_url" >> "$LOGFILE"
+    
+    local playlist_name=$(get_playlist_info "$playlist_url")
+    if [[ -n "$playlist_name" ]]; then
+      echo "[$(date '+%F %T')] Playlist name: $playlist_name" >> "$LOGFILE"
+    fi
 
-      # Get playlist name from Spotify API first
-      local playlist_name=$(get_playlist_info "$playlist_url")
-      if [[ -z "$playlist_name" ]]; then
-        echo "[$(date '+%F %T')] Warning: Could not get playlist name from Spotify API" >> "$LOGFILE"
-      else
-        echo "[$(date '+%F %T')] Playlist name: $playlist_name" >> "$LOGFILE"
-      fi
+    build_sldl_command
+    
+    "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
+    local sldl_pid=$!
 
-      # Build command with current ban list
-      build_sldl_command
-      
-      # Start the download process
-      "${SLDL_CMD[@]}" "$playlist_url" >> "$LOGFILE" 2>&1 &
-      local sldl_pid=$!
+    monitor_and_restart "$LOGFILE" "$playlist_url" &
+    local monitor_pid=$!
+    
+    trap "kill $monitor_pid 2>/dev/null || true" EXIT
 
-      # Start monitoring in background
-      monitor_and_restart "$LOGFILE" "$playlist_url" &
-      local monitor_pid=$!
-      
-      # Clean up monitor when sldl finishes
-      trap "kill $monitor_pid 2>/dev/null || true" EXIT
+    while kill -0 $sldl_pid 2>/dev/null; do
+      sleep 3
+    done
 
-      # Wait for sldl to complete
-      while kill -0 $sldl_pid 2>/dev/null; do
-        sleep 3
-      done
+    kill $monitor_pid 2>/dev/null || true
 
-      # Kill the monitor for this playlist
-      kill $monitor_pid 2>/dev/null || true
+    echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
+    
+    # Process completed playlist
+    local playlist_folder=""
+    if [[ -n "$playlist_name" ]]; then
+      playlist_folder="$DL_PATH/$playlist_name"
+    fi
+    
+    if [[ ! -d "$playlist_folder" ]]; then
+      playlist_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+    fi
+    
+    if [[ -n "$playlist_folder" && -d "$playlist_folder" ]]; then
+      echo "[$(date '+%F %T')] Processing playlist folder: $playlist_folder" >> "$LOGFILE"
+      process_completed_playlist "$playlist_folder"
+      generate_m3u_playlist "$playlist_folder" "$(basename "$playlist_folder")"
+    fi
 
-      echo "[$(date '+%F %T')] Completed download for $playlist_url" >> "$LOGFILE"
-      
-      # Process the completed playlist folder for file renaming and tagging
-      local playlist_folder=""
-      
-      # Try multiple methods to find the playlist folder
-      # Method 1: Use the playlist name we got from Spotify API
-      if [[ -n "$playlist_name" ]]; then
-        playlist_folder="$DL_PATH/$playlist_name"
-        if [[ ! -d "$playlist_folder" ]]; then
-          # Try without sanitization in case sldl uses the raw name
-          local playlist_id="${playlist_url##*/}"
-          playlist_id="${playlist_id%%\?*}"
-          local raw_name=$(python3 -c "
+  done < "$PLAYLISTS_TMP"
+}
+
+# Main loop for discography mode
+# Main loop for discography mode
+# Main loop for discography mode
+discography_mode() {
+  local mode="$1"
+  echo "[$(date '+%F %T')] Running in discography mode: $mode" >> "$LOGFILE"
+  
+  # Create Artists directory structure
+  mkdir -p "$DL_PATH/Artists"
+  
+  # Get unique artists
+  local artists_file=$(mktemp "$TMPDIR/spotiplex_artists_XXXXXX.txt")
+  local selected_playlists=""
+  
+  if [[ "$mode" == "$MODE_DISCOGRAPHY_SELECTED" ]]; then
+    # Let user select playlists
+    echo "Select playlists for discography download:"
+    PLAYLISTS_TMP=$(mktemp "$TMPDIR/spotiplex_playlists_XXXXXX.txt")
+    
+    # Get all playlists first
+    echo "Fetching your playlists..."
+    python3 << EOF > "$PLAYLISTS_TMP"
 import spotipy
-from spotipy.oauth2 import SpotifyClientCredentials
-try:
-    auth = SpotifyClientCredentials(client_id='$SPOTIFY_ID', client_secret='$SPOTIFY_SECRET')
-    sp = spotipy.Spotify(auth_manager=auth)
-    print(sp.playlist('$playlist_id', fields='name')['name'])
-except: pass
-" 2>/dev/null)
-          if [[ -n "$raw_name" ]]; then
-            playlist_folder="$DL_PATH/$raw_name"
-          fi
+from spotipy.oauth2 import SpotifyOAuth
+
+auth = SpotifyOAuth(
+    client_id="$SPOTIFY_ID",
+    client_secret="$SPOTIFY_SECRET",
+    redirect_uri="$SPOTIFY_REDIRECT",
+    scope="playlist-read-private playlist-read-collaborative",
+    open_browser=False,
+    cache_path="/pstore/spotiplex-token",
+    show_dialog=False
+)
+
+token_info = auth.get_cached_token()
+if token_info:
+    sp = spotipy.Spotify(auth=token_info["access_token"])
+    offset = 0
+    while True:
+        playlists = sp.current_user_playlists(limit=50, offset=offset)["items"]
+        if not playlists:
+            break
+        for playlist in playlists:
+            print(f"{playlist['external_urls']['spotify']}|{playlist['name']}")
+        offset += 50
+else:
+    print("Error: No Spotify token found", file=sys.stderr)
+EOF
+    
+    # Check if we got any playlists
+    if [[ ! -s "$PLAYLISTS_TMP" ]]; then
+      echo "Error: No playlists found or Spotify authentication failed"
+      echo "Please check your Spotify credentials and try again"
+      return 1
+    fi
+    
+    local playlist_count=$(wc -l < "$PLAYLISTS_TMP")
+    echo "Found $playlist_count playlists"
+    
+    # Let user select with gum or basic prompt
+    selected_playlists=$(mktemp "$TMPDIR/spotiplex_selected_XXXXXX.txt")
+    
+    if command -v gum &>/dev/null; then
+      # Use gum for multi-select - robust approach using pipe separator
+      echo "Use SPACE to select playlists, ENTER to confirm:"
+      
+      # Create a temporary file with numbered playlists for robust selection
+      local playlist_mapping_tmp=$(mktemp "$TMPDIR/spotiplex_mapping_XXXXXX.txt")
+      local playlist_names_tmp=$(mktemp "$TMPDIR/spotiplex_names_XXXXXX.txt")
+      
+      # Create numbered mapping and names file using pipe separator
+      local counter=1
+      while IFS='|' read -r url name; do
+        echo "$counter|$url" >> "$playlist_mapping_tmp"
+        echo "$counter) $name" >> "$playlist_names_tmp"
+        ((counter++))
+      done < "$PLAYLISTS_TMP"
+      
+      # Let user select using numbered format
+      local selected_numbers_tmp=$(mktemp "$TMPDIR/spotiplex_selected_numbers_XXXXXX.txt")
+      gum choose --no-limit < "$playlist_names_tmp" | sed 's/) .*//' > "$selected_numbers_tmp"
+      
+      # Convert numbers back to URLs using the mapping
+      while IFS= read -r selected_number; do
+        grep "^$selected_number|" "$playlist_mapping_tmp" | cut -d'|' -f2
+      done < "$selected_numbers_tmp" > "$selected_playlists"
+      
+      # Cleanup temp files
+      rm -f "$playlist_mapping_tmp" "$playlist_names_tmp" "$selected_numbers_tmp"
+      
+    else
+      # Fallback to basic selection
+      echo "Available playlists:"
+      local counter=1
+      declare -A playlist_array
+      while IFS='|' read -r url name; do
+        echo "$counter) $name"
+        playlist_array["$counter"]="$url"
+        ((counter++))
+      done < "$PLAYLISTS_TMP"
+      
+      echo "Enter playlist numbers separated by spaces (e.g., 1 3 5):"
+      read -rp "Playlist numbers: " selection
+      
+      for num in $selection; do
+        if [[ -n "${playlist_array[$num]:-}" ]]; then
+          echo "${playlist_array[$num]}" >> "$selected_playlists"
         fi
-      fi
+      done
+    fi
+    
+    # Check if user selected any playlists
+    if [[ ! -s "$selected_playlists" ]]; then
+      echo "No playlists selected. Exiting."
+      return 1
+    fi
+    
+    local selected_count=$(wc -l < "$selected_playlists")
+    echo "Selected $selected_count playlists for discography download"
+  fi
+  
+  echo "[$(date '+%F %T')] Extracting unique artists..." >> "$LOGFILE"
+  get_unique_artists "$selected_playlists" > "$artists_file"
+  
+  local artist_count=$(wc -l < "$artists_file")
+  echo "[$(date '+%F %T')] Found $artist_count unique artists" >> "$LOGFILE"
+  
+  if [[ $artist_count -eq 0 ]]; then
+    echo "No artists found. This could be because:"
+    echo "- No playlists were selected"
+    echo "- Selected playlists are empty"
+    echo "- Spotify API access failed"
+    return 1
+  fi
+  
+  # Show first few artists for confirmation
+  echo "First few artists found:"
+  head -10 "$artists_file"
+  
+  # Generate discography list with individual tracks
+  echo "[$(date '+%F %T')] Generating discography with individual tracks..." >> "$LOGFILE"
+  echo "This may take a while as we fetch complete track listings..."
+  generate_discography "$artists_file" > "$DISCOGRAPHY_FILE"
+  
+  local track_count=$(wc -l < "$DISCOGRAPHY_FILE")
+  echo "[$(date '+%F %T')] Generated $track_count individual tracks for download" >> "$LOGFILE"
+  
+  if [[ $track_count -eq 0 ]]; then
+    echo "No tracks found in discography. This could be because:"
+    echo "- MusicBrainz couldn't find the artists"
+    echo "- All albums were filtered out (compilations, live, etc.)"
+    echo "- API rate limits or network issues"
+    return 1
+  fi
+  
+  echo "Generated $track_count individual tracks for download"
+  echo "First few tracks:"
+  head -5 "$DISCOGRAPHY_FILE"
+  
+  # Download using sldl with the generated track list
+  build_sldl_command
+  
+  # Modify path to use Artists directory and add list input parameters
+  local modified_cmd=("${SLDL_CMD[@]}")
+  
+  # Replace the path to use Artists directory
+  for i in "${!modified_cmd[@]}"; do
+    if [[ "${modified_cmd[$i]}" == "--path" ]]; then
+      modified_cmd[$((i+1))]="$DL_PATH/Artists"
+      break
+    fi
+  done
+  
+  # Add list input parameters for individual track downloads (removed --album flag)
+  modified_cmd+=(
+    "--input-type" "list"
+    "--input" "$DISCOGRAPHY_FILE"
+    "--album-art"
+  )
+  
+  echo "[$(date '+%F %T')] Starting individual track downloads..." >> "$LOGFILE"
+  echo "Command: ${modified_cmd[*]}" >> "$LOGFILE"
+  echo ""
+  echo "Starting download of $track_count individual tracks..."
+  echo "This will take a while. Progress will be logged to $LOGFILE"
+  
+  "${modified_cmd[@]}" >> "$LOGFILE" 2>&1 &
+  local sldl_pid=$!
+  
+  monitor_and_restart "$LOGFILE" "discography" &
+  local monitor_pid=$!
+  
+  trap "kill $monitor_pid 2>/dev/null || true" EXIT
+  
+  while kill -0 $sldl_pid 2>/dev/null; do
+    sleep 3
+  done
+  
+  kill $monitor_pid 2>/dev/null || true
+  
+  echo "[$(date '+%F %T')] Individual track downloads completed" >> "$LOGFILE"
+  echo "Download phase completed. Starting organization..."
+  
+  # Organize downloaded tracks into album folders and process
+  echo "[$(date '+%F %T')] Starting track organization into album folders..." >> "$LOGFILE"
+  organize_tracks_into_albums "$DL_PATH/Artists"
+  
+  # Generate master M3U playlists for each artist
+  echo "[$(date '+%F %T')] Generating artist-level M3U playlists..." >> "$LOGFILE"
+  find "$DL_PATH/Artists" -maxdepth 1 -type d | while read -r artist_folder; do
+    if [[ "$artist_folder" != "$DL_PATH/Artists" ]]; then
+      local artist_name=$(basename "$artist_folder")
+      local artist_m3u="$DL_PATH/Playlists/${artist_name}_Complete_Discography.m3u"
       
-      # Method 2: Look for the most recently modified directory in DL_PATH
-      if [[ ! -d "$playlist_folder" ]]; then
-        playlist_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-      fi
+      mkdir -p "$DL_PATH/Playlists"
       
-      # Method 3: Try to extract from sldl log output
-      if [[ ! -d "$playlist_folder" ]]; then
-        local extracted_name=$(extract_playlist_name_from_log)
-        if [[ -n "$extracted_name" ]]; then
-          playlist_folder="$DL_PATH/$extracted_name"
-        fi
-      fi
+      echo "[$(date '+%F %T')] Generating discography M3U for: $artist_name" >> "$LOGFILE"
       
-      if [[ -n "$playlist_folder" && -d "$playlist_folder" ]]; then
-        echo "[$(date '+%F %T')] Processing playlist folder: $playlist_folder" >> "$LOGFILE"
-        process_completed_playlist "$playlist_folder"
-      else
-        echo "[$(date '+%F %T')] Could not determine playlist folder for renaming" >> "$LOGFILE"
-        echo "[$(date '+%F %T')] Checked paths: $DL_PATH/$playlist_name" >> "$LOGFILE"
-        echo "[$(date '+%F %T')] Available folders in $DL_PATH:" >> "$LOGFILE"
-        ls -la "$DL_PATH" >> "$LOGFILE" 2>&1
-      fi
+      # Find all music files in artist folder and subfolders
+      find "$artist_folder" -type f \( -iname "*.mp3" -o -iname "*.flac" -o -iname "*.m4a" -o -iname "*.ogg" \) | sort | while read -r music_file; do
+        # Convert to container path
+        local container_path="${music_file/#$DL_PATH/\/music}"
+        echo "$container_path"
+      done > "$artist_m3u"
+    fi
+  done
+  
+  echo "[$(date '+%F %T')] Discography mode completed successfully" >> "$LOGFILE"
+  echo ""
+  echo "Discography download and organization completed!"
+  echo "Results:"
+  echo "- Individual tracks downloaded: $track_count"
+  echo "- Organized into album folders under: $DL_PATH/Artists/"
+  echo "- Album M3U playlists generated for each album"
+  echo "- Artist discography M3U playlists generated in: $DL_PATH/Playlists/"
+  echo "- All tracks tagged with proper metadata"
+  echo ""
+  echo "Check the log for details: $LOGFILE"
+  
+  # Cleanup
+  rm -f "$artists_file" "$selected_playlists" 2>/dev/null
+}
 
-    done < "$PLAYLISTS_TMP"
+# Organize individual tracks into album folders
+organize_tracks_into_albums() {
+  local base_path="$1"
+  echo "[$(date '+%F %T')] Organizing tracks into album folders..." >> "$LOGFILE"
+  
+  local organize_script=$(mktemp "$TMPDIR/spotiplex_organize_XXXXXX.py")
+  
+  cat > "$organize_script" <<'ORGANIZE_SCRIPT'
+import os
+import sys
+import shutil
+import csv
+from pathlib import Path
+import eyed3
 
-    echo "[$(date '+%F %T')] All playlists processed" >> "$LOGFILE"
-  ) &
+def sanitize_filename(name):
+    """Sanitize filename by removing problematic characters"""
+    for char in ['/', '\\', '?', '*', ':', '"', '<', '>', '|']:
+        name = name.replace(char, '')
+    return name.strip(' .')
 
-  # Start tailing the log file in the foreground
-  echo "[$(date '+%F %T')] Starting log tail..." >> "$LOGFILE"
+def organize_artist_folder(artist_path):
+    """Organize an artist folder by moving tracks into album subfolders"""
+    print(f"Processing artist folder: {artist_path}")
+    
+    # Read the index file if it exists
+    index_file = os.path.join(artist_path, "_index.sldl")
+    if not os.path.exists(index_file):
+        print(f"No index file found in {artist_path}")
+        return
+    
+    tracks_by_album = {}
+    
+    # Read index to get track->album mapping
+    with open(index_file, 'r', newline='', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        
+        for row in reader:
+            if len(row) >= 4:
+                filepath, artist, album, title = row[0], row[1], row[2], row[3]
+                
+                if not album or not filepath:
+                    continue
+                
+                sanitized_album = sanitize_filename(album)
+                
+                if sanitized_album not in tracks_by_album:
+                    tracks_by_album[sanitized_album] = []
+                
+                tracks_by_album[sanitized_album].append({
+                    'filepath': filepath.strip('./\\'),
+                    'artist': artist,
+                    'album': album,
+                    'title': title,
+                    'full_row': row
+                })
+    
+    print(f"Found {len(tracks_by_album)} albums with tracks")
+    
+    # Create album folders and move tracks
+    new_index_data = [header] if header else []
+    
+    for album_name, tracks in tracks_by_album.items():
+        album_folder = os.path.join(artist_path, album_name)
+        os.makedirs(album_folder, exist_ok=True)
+        
+        print(f"  Processing album: {album_name} ({len(tracks)} tracks)")
+        
+        album_index_data = [header] if header else []
+        
+        for track_info in tracks:
+            old_path = os.path.join(artist_path, track_info['filepath'])
+            
+            if os.path.exists(old_path):
+                # Create new filename: Artist - Title.ext
+                file_ext = os.path.splitext(track_info['filepath'])[1]
+                new_filename = f"{sanitize_filename(track_info['artist'])} - {sanitize_filename(track_info['title'])}{file_ext}"
+                new_path = os.path.join(album_folder, new_filename)
+                
+                try:
+                    shutil.move(old_path, new_path)
+                    print(f"    Moved: {track_info['filepath']} -> {album_name}/{new_filename}")
+                    
+                    # Update the row data for the new path
+                    updated_row = track_info['full_row'].copy()
+                    updated_row[0] = new_filename  # Update filepath
+                    album_index_data.append(updated_row)
+                    
+                    # Tag the file
+                    tag_file(new_path, track_info['artist'], track_info['album'], track_info['title'])
+                    
+                except Exception as e:
+                    print(f"    Error moving {old_path}: {e}")
+                    album_index_data.append(track_info['full_row'])
+            else:
+                print(f"    File not found: {old_path}")
+                album_index_data.append(track_info['full_row'])
+        
+        # Create album-specific index file
+        album_index_file = os.path.join(album_folder, "_index.sldl")
+        with open(album_index_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerows(album_index_data)
+        
+        # Generate M3U playlist for this album
+        generate_album_m3u(album_folder, album_name)
+    
+    # Update main index file (remove entries that were moved)
+    with open(index_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerows(new_index_data)
+
+def tag_file(filepath, artist, album, title):
+    """Tag audio file with metadata"""
+    try:
+        eyed3.log.setLevel("ERROR")
+        audiofile = eyed3.load(filepath)
+        
+        if audiofile and audiofile.tag:
+            audiofile.tag.artist = artist
+            audiofile.tag.title = title
+            audiofile.tag.album = album
+            
+            # Clear junk metadata
+            audiofile.tag.album_artist = None
+            audiofile.tag.genre = None
+            
+            # Remove comments and user text frames
+            for comment in list(audiofile.tag.comments):
+                audiofile.tag.comments.remove(comment.description)
+            
+            for frame in list(audiofile.tag.user_text_frames):
+                audiofile.tag.user_text_frames.remove(frame.description)
+            
+            audiofile.tag.save(version=eyed3.id3.ID3_V2_3)
+            
+    except Exception as e:
+        print(f"    Tagging failed for {filepath}: {e}")
+
+def generate_album_m3u(album_folder, album_name):
+    """Generate M3U playlist for album"""
+    m3u_file = os.path.join(album_folder, f"{sanitize_filename(album_name)}.m3u")
+    
+    music_files = []
+    for ext in ['.mp3', '.flac', '.m4a', '.ogg']:
+        music_files.extend(Path(album_folder).glob(f"*{ext}"))
+    
+    music_files.sort()
+    
+    with open(m3u_file, 'w', encoding='utf-8') as f:
+        for music_file in music_files:
+            # Use relative path within the album folder
+            f.write(f"{music_file.name}\n")
+
+# Main execution
+base_path = sys.argv[1]
+
+for artist_folder in os.listdir(base_path):
+    artist_path = os.path.join(base_path, artist_folder)
+    if os.path.isdir(artist_path):
+        organize_artist_folder(artist_path)
+
+print("Organization complete!")
+ORGANIZE_SCRIPT
+
+  python3 "$organize_script" "$base_path"
+  rm -f "$organize_script"
+  
+  echo "[$(date '+%F %T')] Track organization completed" >> "$LOGFILE"
+}
+
+main_loop() {
+  print_header
+  source "$CONFIG_FILE"
+
+  # Determine mode
+  local download_mode="${DOWNLOAD_MODE:-$MODE_PLAYLISTS}"
+  
+  case "$download_mode" in
+    "$MODE_PLAYLISTS")
+      playlist_mode
+      ;;
+    "$MODE_DISCOGRAPHY_ALL"|"$MODE_DISCOGRAPHY_SELECTED")
+      discography_mode "$download_mode"
+      ;;
+    *)
+      echo "[$(date '+%F %T')] Unknown download mode: $download_mode, defaulting to playlists" >> "$LOGFILE"
+      playlist_mode
+      ;;
+  esac
+
+  echo "[$(date '+%F %T')] All processing completed" >> "$LOGFILE"
   tail -f "$LOGFILE"
 }
 
 # Debug mode for testing single playlist
 debug_single_playlist() {
   local playlist_url="$1"
-  
-  # Set debug flag for extra output
   export DEBUG_MODE=1
   
   echo "=== DEBUG MODE ==="
   echo "Testing playlist: $playlist_url"
-  echo ""
   
-  # Load config
   if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: No config file found. Run script normally first to create config."
     exit 1
   fi
   
   source "$CONFIG_FILE"
-  
-  # Initialize variables
-  local sldl_folder=""
-  local sldl_playlist_name=""
   
   # Get playlist info from Spotify
   echo "[DEBUG] Getting playlist info from Spotify API..."
@@ -704,7 +1484,6 @@ debug_single_playlist() {
   local sldl_folder=""
   
   # Look for common patterns in sldl output that indicate folder creation
-  # Patterns to look for: "Downloading to", "Output directory", "Saving to", etc.
   if grep -q "Downloading.*to '" "$temp_output"; then
     sldl_folder=$(grep -oP "Downloading.*to '\K[^']+" "$temp_output" | head -1 | xargs dirname)
     echo "[DEBUG] Extracted folder from 'Downloading to' pattern: $sldl_folder"
@@ -738,49 +1517,32 @@ debug_single_playlist() {
     fi
   fi
   
-  # Method 2: Try to find from sldl output in log
+  # Method 2: Most recent folder
   if [[ -z "$found_folder" ]]; then
-    echo "[DEBUG] Trying method 2: Extract from log..."
-    local extracted_name=$(extract_playlist_name_from_log)
-    if [[ -n "$extracted_name" ]]; then
-      local test_path="$DL_PATH/$extracted_name"
-      if [[ -d "$test_path" ]]; then
-        found_folder="$test_path"
-        echo "[DEBUG] ✓ Method 2 SUCCESS: Found via log extraction: $found_folder"
-      else
-        echo "[DEBUG] ✗ Method 2 FAILED: Extracted '$extracted_name' but path doesn't exist"
-      fi
-    else
-      echo "[DEBUG] ✗ Method 2 FAILED: Could not extract name from log"
-    fi
-  fi
-  
-  # Method 3: Most recent folder
-  if [[ -z "$found_folder" ]]; then
-    echo "[DEBUG] Trying method 3: Most recent folder..."
+    echo "[DEBUG] Trying method 2: Most recent folder..."
     found_folder=$(find "$DL_PATH" -maxdepth 1 -type d -not -path "$DL_PATH" -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
     if [[ -n "$found_folder" ]]; then
-      echo "[DEBUG] ✓ Method 3 SUCCESS: Found via most recent: $found_folder"
+      echo "[DEBUG] ✓ Method 2 SUCCESS: Found via most recent: $found_folder"
     else
-      echo "[DEBUG] ✗ Method 3 FAILED: No folders found"
+      echo "[DEBUG] ✗ Method 2 FAILED: No folders found"
     fi
   fi
   
-  # Method 4: Look for any folder with an _index.sldl file
+  # Method 3: Look for any folder with an _index.sldl file
   if [[ -z "$found_folder" ]]; then
-    echo "[DEBUG] Trying method 4: Any folder with _index.sldl..."
+    echo "[DEBUG] Trying method 3: Any folder with _index.sldl..."
     while IFS= read -r -d '' index_file; do
       local parent_dir=$(dirname "$index_file")
       # Check if this index was modified recently (within last 5 minutes)
       if [[ $(find "$index_file" -mmin -5 -print 2>/dev/null) ]]; then
         found_folder="$parent_dir"
-        echo "[DEBUG] ✓ Method 4 SUCCESS: Found via recent index file: $found_folder"
+        echo "[DEBUG] ✓ Method 3 SUCCESS: Found via recent index file: $found_folder"
         break
       fi
     done < <(find "$DL_PATH" -maxdepth 2 -name "_index.sldl" -print0 2>/dev/null)
     
     if [[ -z "$found_folder" ]]; then
-      echo "[DEBUG] ✗ Method 4 FAILED: No recent _index.sldl files found"
+      echo "[DEBUG] ✗ Method 3 FAILED: No recent _index.sldl files found"
     fi
   fi
   
@@ -864,58 +1626,20 @@ except Exception as e:
     done
     
     echo ""
-    echo "[DEBUG] Mismatch Analysis:"
-    echo "[DEBUG] Files in folder but not in index:"
+    echo "[DEBUG] === SUMMARY ==="
+    echo "[DEBUG] Spotify playlist name: ${playlist_name:-'(failed to get)'}"
+    echo "[DEBUG] Expected folder path: $DL_PATH/${playlist_name:-'???'}"
+    echo "[DEBUG] Actual folder found: ${found_folder:-'(none)'}"
     
-    # Get list of files in folder
-    local folder_files=()
-    while IFS= read -r -d '' file; do
-      folder_files+=("$(basename "$file")")
-    done < <(find "$found_folder" -maxdepth 1 -type f -name "*.mp3" -print0)
-    
-    # Get list of files from index
-    local index_files=()
-    if [[ -f "$found_folder/_index.sldl" ]]; then
-      while IFS=, read -r filepath rest; do
-        if [[ "$filepath" != "filepath" ]]; then
-          filepath="${filepath#./}"
-          filepath="${filepath%\"}"
-          filepath="${filepath#\"}"
-          index_files+=("$filepath")
-        fi
-      done < "$found_folder/_index.sldl"
+    if [[ -n "$sldl_playlist_name" ]] && [[ "$sldl_playlist_name" != "$playlist_name" ]]; then
+      echo "[DEBUG] Note: sldl used different name: $sldl_playlist_name"
     fi
-    
-    # Show files in folder but not in index
-    for file in "${folder_files[@]}"; do
-      if [[ ! " ${index_files[*]} " =~ " ${file} " ]]; then
-        echo "  - $file"
-      fi
-    done
-    
-    echo ""
-    echo "[DEBUG] Files in index but not in folder:"
-    for file in "${index_files[@]}"; do
-      if [[ ! " ${folder_files[*]} " =~ " ${file} " ]]; then
-        echo "  - $file"
-      fi
-    done
   else
     echo ""
     echo "[DEBUG] ERROR: Could not find downloaded folder!"
     echo "[DEBUG] Checked paths:"
     echo "  - $DL_PATH/$playlist_name"
     echo "  - Most recent folder in $DL_PATH"
-  fi
-  
-  echo ""
-  echo "[DEBUG] === SUMMARY ==="
-  echo "[DEBUG] Spotify playlist name: ${playlist_name:-'(failed to get)'}"
-  echo "[DEBUG] Expected folder path: $DL_PATH/${playlist_name:-'???'}"
-  echo "[DEBUG] Actual folder found: ${found_folder:-'(none)'}"
-  
-  if [[ -n "$sldl_playlist_name" ]] && [[ "$sldl_playlist_name" != "$playlist_name" ]]; then
-    echo "[DEBUG] Note: sldl used different name: $sldl_playlist_name"
   fi
   
   echo ""
@@ -953,12 +1677,10 @@ done
 
 # Run appropriate mode
 if [[ $DEBUG_MODE -eq 1 ]]; then
-  # Debug mode - single playlist test
   install_dependencies
   download_sldl
   debug_single_playlist "$DEBUG_URL"
 else
-  # Normal mode
   kill_existing_instances
   install_dependencies
   download_sldl
@@ -971,4 +1693,3 @@ else
 
   main_loop
 fi
-
