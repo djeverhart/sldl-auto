@@ -432,172 +432,6 @@ EOF
   rm -f "$ARTISTS_TMP"
 }
 
-# Generate discography with individual tracks using MusicBrainz API
-generate_discography() {
-  local artists_file="$1"
-  
-  echo "[$(date '+%F %T')] Generating discography with individual tracks from artists..." >> "$LOGFILE"
-  
-  local py_script=$(mktemp "$TMPDIR/spotiplex_discography_XXXXXX.py")
-  
-  cat > "$py_script" <<EOF
-import requests
-import time
-import sys
-import os
-
-MB_API = "https://musicbrainz.org/ws/2"
-SLEEP_TIME = 1.2  # Increased for more API calls
-HEADERS = {
-    "User-Agent": f"Spotiplex/1.0 ($MB_EMAIL)"
-}
-SKIP_KEYWORDS = [
-    "compilation", "greatest hits", "anthology", "essentials",
-    "live", "remix", "remixes", "versions", "rarities", "b-sides", 
-    "instrumental", "compilations", "essential", "karaoke"
-]
-
-def get_musicbrainz_id(artist_name):
-    print(f"Looking up MBID for: {artist_name}", file=sys.stderr)
-    time.sleep(SLEEP_TIME)
-    url = f"{MB_API}/artist/?query=artist:{requests.utils.quote(artist_name)}&fmt=json"
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            if data['artists']:
-                result = data['artists'][0]
-                mbid = result['id']
-                print(f"Found MBID: {mbid}", file=sys.stderr)
-                return mbid
-        else:
-            print(f"Failed to get MBID: {r.status_code}", file=sys.stderr)
-    except Exception as e:
-        print(f"MBID lookup failed: {e}", file=sys.stderr)
-    return None
-
-def get_albums_for_artist(artist_name, mbid):
-    print(f"Fetching albums for: {artist_name}", file=sys.stderr)
-    albums = []
-    params = {
-        "artist": mbid,
-        "type": "album|ep",
-        "fmt": "json",
-        "limit": 100
-    }
-    try:
-        r = requests.get(f"{MB_API}/release-group", params=params, headers=HEADERS)
-        if r.ok:
-            release_groups = r.json().get("release-groups", [])
-            for rg in release_groups:
-                title = rg.get("title", "").strip()
-                if not title:
-                    continue
-                lowered = title.lower()
-                if any(keyword in lowered for keyword in SKIP_KEYWORDS):
-                    continue
-                albums.append({
-                    'title': title,
-                    'id': rg.get('id')
-                })
-            time.sleep(SLEEP_TIME)
-    except Exception as e:
-        print(f"Album fetch failed: {e}", file=sys.stderr)
-    return albums
-
-def get_tracks_for_album(artist_name, album_title, release_group_id):
-    print(f"Fetching tracks for: {artist_name} - {album_title}", file=sys.stderr)
-    tracks = []
-    
-    # Get releases for this release group
-    params = {
-        "release-group": release_group_id,
-        "fmt": "json",
-        "limit": 25
-    }
-    
-    try:
-        r = requests.get(f"{MB_API}/release", params=params, headers=HEADERS)
-        time.sleep(SLEEP_TIME)
-        
-        if r.ok:
-            releases = r.json().get("releases", [])
-            if not releases:
-                return tracks
-            
-            # Use the first release to get track listing
-            release_id = releases[0]['id']
-            
-            # Get track listing
-            track_params = {
-                "inc": "recordings",
-                "fmt": "json"
-            }
-            
-            track_r = requests.get(f"{MB_API}/release/{release_id}", params=track_params, headers=HEADERS)
-            time.sleep(SLEEP_TIME)
-            
-            if track_r.ok:
-                release_data = track_r.json()
-                media_list = release_data.get("media", [])
-                
-                for media in media_list:
-                    track_list = media.get("tracks", [])
-                    for track in track_list:
-                        track_title = track.get("title", "").strip()
-                        if track_title:
-                            tracks.append(track_title)
-                            
-        print(f"Found {len(tracks)} tracks for {album_title}", file=sys.stderr)
-        
-    except Exception as e:
-        print(f"Track fetch failed for {album_title}: {e}", file=sys.stderr)
-    
-    return tracks
-
-# Read artists from file
-with open("$artists_file", "r") as f:
-    artists = [line.strip() for line in f if line.strip()]
-
-output_lines = []
-total_tracks = 0
-
-for artist in artists:
-    print(f"Processing artist: {artist}", file=sys.stderr)
-    mbid = get_musicbrainz_id(artist)
-    if not mbid:
-        continue
-    
-    albums = get_albums_for_artist(artist, mbid)
-    print(f"Found {len(albums)} albums for {artist}", file=sys.stderr)
-    
-    for album in albums:
-        album_title = album['title']
-        album_id = album['id']
-        
-        # Get individual tracks for this album
-        tracks = get_tracks_for_album(artist, album_title, album_id)
-        
-        for track_title in tracks:
-            # Format for sldl with individual track search
-            line = f'artist="{artist}",album="{album_title}",title="{track_title}"'
-            output_lines.append(line)
-            total_tracks += 1
-            
-            if total_tracks % 10 == 0:
-                print(f"Generated {total_tracks} tracks so far...", file=sys.stderr)
-
-print(f"Total tracks generated: {total_tracks}", file=sys.stderr)
-
-# Output all tracks
-for line in output_lines:
-    print(line)
-EOF
-
-  python3 "$py_script" "$artists_file"
-  rm -f "$py_script"
-}
-
 generate_m3u_playlist() {
   local playlist_dir="$1"
   local playlist_name="$2"
@@ -993,9 +827,7 @@ EOF
   done < "$PLAYLISTS_TMP"
 }
 
-# Main loop for discography mode
-# Main loop for discography mode
-# Main loop for discography mode
+# Main loop for discography mode - FIXED VERSION
 discography_mode() {
   local mode="$1"
   echo "[$(date '+%F %T')] Running in discography mode: $mode" >> "$LOGFILE"
@@ -1014,9 +846,10 @@ discography_mode() {
     
     # Get all playlists first
     echo "Fetching your playlists..."
-    python3 << EOF > "$PLAYLISTS_TMP"
+    python3 << EOF > "$PLAYLISTS_TMP" 2>> "$LOGFILE"
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+import sys
 
 auth = SpotifyOAuth(
     client_id="$SPOTIFY_ID",
@@ -1116,7 +949,7 @@ EOF
   fi
   
   echo "[$(date '+%F %T')] Extracting unique artists..." >> "$LOGFILE"
-  get_unique_artists "$selected_playlists" > "$artists_file"
+  get_unique_artists "$selected_playlists" > "$artists_file" 2>> "$LOGFILE"
   
   local artist_count=$(wc -l < "$artists_file")
   echo "[$(date '+%F %T')] Found $artist_count unique artists" >> "$LOGFILE"
@@ -1135,8 +968,420 @@ EOF
   
   # Generate discography list with individual tracks
   echo "[$(date '+%F %T')] Generating discography with individual tracks..." >> "$LOGFILE"
-  echo "This may take a while as we fetch complete track listings..."
-  generate_discography "$artists_file" > "$DISCOGRAPHY_FILE"
+  echo "Starting discography generation in background..."
+  echo "Progress will be logged to $LOGFILE"
+  echo "You can safely detach from this session - the process will continue running."
+  echo ""
+  
+  # Auto-use existing file if it exists and has content, otherwise generate
+  if [[ -f "$DISCOGRAPHY_FILE" && -s "$DISCOGRAPHY_FILE" ]]; then
+    local track_count=$(wc -l < "$DISCOGRAPHY_FILE")
+    echo "[$(date '+%F %T')] Using existing discography file with $track_count tracks" >> "$LOGFILE"
+    echo "Using existing discography file with $track_count tracks"
+  else
+    echo "[$(date '+%F %T')] Starting discography generation in background..." >> "$LOGFILE"
+    
+    # Create a wrapper script that runs the discography generation completely in background
+    local bg_script=$(mktemp "$TMPDIR/spotiplex_bg_discography_XXXXXX.sh")
+    
+    cat > "$bg_script" <<'BACKGROUND_SCRIPT'
+#!/bin/bash
+set -euo pipefail
+
+# All arguments passed to this script
+ARTISTS_FILE="$1"
+DISCOGRAPHY_FILE="$2"
+LOGFILE="$3"
+MB_EMAIL="$4"
+
+echo "[$(date '+%F %T')] Background discography generation started (PID: $$)" >> "$LOGFILE"
+
+# Export variables for Python script
+export ARTISTS_FILE
+export DISCOGRAPHY_FILE
+export MB_EMAIL
+export PYTHONUNBUFFERED=1
+
+# Redirect all output to log file and close stdin
+exec 1>> "$LOGFILE" 2>> "$LOGFILE" 0</dev/null
+
+# Set up signal handling for clean exit - but don't kill background discography process
+cleanup_bg() {
+  if [[ "$1" != "TERM" ]]; then
+    echo "[$(date '+%F %T')] Background discography generation continuing after main process detach (PID: $$)" >> "$LOGFILE"
+  else
+    echo "[$(date '+%F %T')] Background discography generation terminated (PID: $$)" >> "$LOGFILE"
+    exit 1
+  fi
+}
+trap 'cleanup_bg INT' INT
+trap 'cleanup_bg TERM' TERM
+
+generate_discography_bg() {
+  local artists_file="$1"
+  
+  echo "[$(date '+%F %T')] Generating discography with individual tracks from artists..." 
+  
+  PYTHONUNBUFFERED=1 python3 -u << 'PYTHON_SCRIPT'
+import requests
+import time
+import sys
+import os
+import re
+import signal
+
+# For background processes, ignore SIGINT (Ctrl+C) but still handle SIGTERM for clean shutdown
+def signal_handler(sig, frame):
+    if sig == signal.SIGTERM:
+        print(f"[{time.strftime('%F %T')}] Received SIGTERM, exiting gracefully...", flush=True)
+        sys.exit(1)
+    elif sig == signal.SIGINT:
+        print(f"[{time.strftime('%F %T')}] Received SIGINT - ignoring (background process)", flush=True)
+        # Don't exit on SIGINT when running in background
+
+# Only handle SIGTERM for clean shutdown, ignore SIGINT
+signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ignore SIGINT completely
+signal.signal(signal.SIGTERM, signal_handler)
+
+MB_API = "https://musicbrainz.org/ws/2"
+SLEEP_TIME = 1.5  # More conservative rate limiting
+HEADERS = {
+    "User-Agent": f"Spotiplex/1.0 ({os.environ.get('MB_EMAIL', 'unknown')})"
+}
+SKIP_KEYWORDS = [
+    "compilation", "greatest hits", "anthology", "essentials",
+    "live", "remix", "remixes", "versions", "rarities", "b-sides", 
+    "instrumental", "compilations", "essential", "karaoke"
+]
+
+def sanitize_for_sldl(text):
+    """Sanitize text for sldl input format - escape quotes and problematic characters"""
+    if not text:
+        return ""
+    
+    # Remove or replace problematic characters that could break sldl parsing
+    # Replace quotes with smart quotes or remove them
+    text = text.replace('"', "'")  # Replace double quotes with single quotes
+    text = text.replace("'", "'")  # Replace curly single quotes with straight quotes
+    text = text.replace(""", "'")  # Replace curly double quotes
+    text = text.replace(""", "'")  # Replace curly double quotes
+    
+    # Remove other problematic characters that could break parsing
+    text = re.sub(r'[<>|\\\\]', '', text)  # Remove pipe, backslash, angle brackets
+    
+    # Replace multiple spaces with single space and strip
+    text = re.sub(r'\s+', ' ', text).strip()
+    
+    return text
+
+def get_musicbrainz_id(artist_name, max_retries=2):
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            print(f"[{time.strftime('%F %T')}] Retry {attempt} for MBID lookup: {artist_name}", flush=True)
+            time.sleep(SLEEP_TIME * attempt)  # Progressive backoff
+            
+        print(f"[{time.strftime('%F %T')}] Looking up MBID for: {artist_name}", flush=True)
+        time.sleep(SLEEP_TIME)
+        url = f"{MB_API}/artist/?query=artist:{requests.utils.quote(artist_name)}&fmt=json"
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                if data['artists']:
+                    result = data['artists'][0]
+                    mbid = result['id']
+                    print(f"[{time.strftime('%F %T')}] Found MBID: {mbid}", flush=True)
+                    return mbid
+            else:
+                print(f"[{time.strftime('%F %T')}] Failed to get MBID: {r.status_code}", flush=True)
+        except requests.exceptions.Timeout:
+            print(f"[{time.strftime('%F %T')}] Timeout looking up MBID for: {artist_name} (attempt {attempt + 1})", flush=True)
+            if attempt < max_retries:
+                time.sleep(SLEEP_TIME * 3)  # Back off more on timeout
+                continue
+        except requests.exceptions.RequestException as e:
+            print(f"[{time.strftime('%F %T')}] Request error looking up MBID for {artist_name}: {e} (attempt {attempt + 1})", flush=True)
+            if attempt < max_retries:
+                time.sleep(SLEEP_TIME * 2)  # Back off on request errors
+                continue
+        except Exception as e:
+            print(f"[{time.strftime('%F %T')}] MBID lookup failed: {e}", flush=True)
+            break
+            
+    print(f"[{time.strftime('%F %T')}] Failed to get MBID for {artist_name} after {max_retries + 1} attempts", flush=True)
+    return None
+
+def get_albums_for_artist(artist_name, mbid):
+    print(f"[{time.strftime('%F %T')}] Fetching albums for: {artist_name}", flush=True)
+    albums = []
+    
+    params = {
+        "artist": mbid,
+        "fmt": "json",
+        "limit": 100
+    }
+    
+    try:
+        r = requests.get(f"{MB_API}/release-group", params=params, headers=HEADERS, timeout=15)
+        if r.ok:
+            release_groups = r.json().get("release-groups", [])
+            print(f"[{time.strftime('%F %T')}] Raw API returned {len(release_groups)} release groups", flush=True)
+            
+            for rg in release_groups:
+                title = rg.get("title", "").strip()
+                if not title:
+                    continue
+                
+                primary_type = rg.get("primary-type", "N/A")
+                secondary_types = rg.get("secondary-types", [])
+                
+                # Only consider Albums and EPs as potential mainline releases
+                if primary_type.lower() not in ["album", "ep"]:
+                    continue
+                
+                # Skip releases with certain secondary types that indicate non-mainline
+                if secondary_types:
+                    secondary_lower = [st.lower() for st in secondary_types]
+                    excluded_secondary = [
+                        "compilation", "live", "soundtrack", 
+                        "remix", "dj-mix", "demo"
+                    ]
+                    
+                    if any(exc in secondary_lower for exc in excluded_secondary):
+                        print(f"[{time.strftime('%F %T')}]   Skipped '{title}' - Secondary type: {secondary_types}", flush=True)
+                        continue
+                
+                # Skip obvious compilation/live keywords in title
+                # Note: We DO want to keep deluxe editions as they're mainline releases
+                lowered = title.lower()
+                skip_keywords = [
+                    "greatest hits", "best of", "anthology", "collection",
+                    "compilation", "live at", "live in", "live from",
+                    "unreleased", "rarities", "b-sides", "demo",
+                    "remaster", "remastered"
+                ]
+                
+                should_skip = False
+                for keyword in skip_keywords:
+                    if keyword in lowered:
+                        print(f"[{time.strftime('%F %T')}]   Skipped '{title}' - Keyword: {keyword}", flush=True)
+                        should_skip = True
+                        break
+                
+                if should_skip:
+                    continue
+                
+                # Accept this as a mainline release
+                albums.append({
+                    'title': title,
+                    'id': rg.get('id'),
+                    'primary_type': primary_type,
+                    'secondary_types': secondary_types
+                })
+                print(f"[{time.strftime('%F %T')}]   INCLUDED '{title}' - Primary: {primary_type}", flush=True)
+            
+            time.sleep(SLEEP_TIME)
+            
+        print(f"[{time.strftime('%F %T')}] Found {len(albums)} mainline albums for {artist_name}", flush=True)
+        
+    except requests.exceptions.Timeout:
+        print(f"[{time.strftime('%F %T')}] Timeout fetching albums for {artist_name}, skipping", flush=True)
+        time.sleep(SLEEP_TIME * 3)  # Back off more on timeout
+    except requests.exceptions.RequestException as e:
+        print(f"[{time.strftime('%F %T')}] Request error fetching albums for {artist_name}: {e}", flush=True)
+        time.sleep(SLEEP_TIME * 2)  # Back off on request errors
+    except Exception as e:
+        print(f"[{time.strftime('%F %T')}] Album fetch failed for {artist_name}: {e}", flush=True)
+    
+    return albums
+
+def get_tracks_for_album(artist_name, album_title, release_group_id):
+    print(f"[{time.strftime('%F %T')}] Fetching tracks for: {artist_name} - {album_title}", flush=True)
+    tracks = []
+    
+    # Get releases for this release group
+    params = {
+        "release-group": release_group_id,
+        "fmt": "json",
+        "limit": 25
+    }
+    
+    try:
+        r = requests.get(f"{MB_API}/release", params=params, headers=HEADERS, timeout=15)
+        time.sleep(SLEEP_TIME)
+        
+        if r.ok:
+            releases = r.json().get("releases", [])
+            if not releases:
+                return tracks
+            
+            # Use the first release to get track listing
+            release_id = releases[0]['id']
+            
+            # Get track listing
+            track_params = {
+                "inc": "recordings",
+                "fmt": "json"
+            }
+            
+            track_r = requests.get(f"{MB_API}/release/{release_id}", params=track_params, headers=HEADERS, timeout=15)
+            time.sleep(SLEEP_TIME)
+            
+            if track_r.ok:
+                release_data = track_r.json()
+                media_list = release_data.get("media", [])
+                
+                for media in media_list:
+                    track_list = media.get("tracks", [])
+                    for track in track_list:
+                        track_title = track.get("title", "").strip()
+                        if track_title:
+                            tracks.append(track_title)
+                            
+        print(f"[{time.strftime('%F %T')}] Found {len(tracks)} tracks for {album_title}", flush=True)
+        
+    except requests.exceptions.Timeout:
+        print(f"[{time.strftime('%F %T')}] Timeout fetching tracks for {album_title}, skipping", flush=True)
+        time.sleep(SLEEP_TIME * 3)  # Back off more on timeout
+    except requests.exceptions.RequestException as e:
+        print(f"[{time.strftime('%F %T')}] Request error fetching tracks for {album_title}: {e}", flush=True)
+        time.sleep(SLEEP_TIME * 2)  # Back off on request errors
+    except Exception as e:
+        print(f"[{time.strftime('%F %T')}] Track fetch failed for {album_title}: {e}", flush=True)
+    
+    return tracks
+
+# Read artists from file
+with open(os.environ['ARTISTS_FILE'], "r") as f:
+    artists = [line.strip() for line in f if line.strip()]
+
+output_lines = []
+total_tracks = 0
+
+print(f"[{time.strftime('%F %T')}] Processing {len(artists)} artists for discography generation", flush=True)
+
+for artist_idx, artist in enumerate(artists, 1):
+    print(f"[{time.strftime('%F %T')}] Processing artist {artist_idx}/{len(artists)}: {artist}", flush=True)
+    mbid = get_musicbrainz_id(artist)
+    if not mbid:
+        print(f"[{time.strftime('%F %T')}] Skipping {artist} - no MBID found", flush=True)
+        continue
+    
+    albums = get_albums_for_artist(artist, mbid)
+    print(f"[{time.strftime('%F %T')}] Processing {len(albums)} albums for {artist}", flush=True)
+    
+    for i, album in enumerate(albums, 1):
+        album_title = album['title']
+        album_id = album['id']
+        
+        print(f"[{time.strftime('%F %T')}]   Album {i}/{len(albums)}: {album_title}", flush=True)
+        
+        # Get individual tracks for this album
+        tracks = get_tracks_for_album(artist, album_title, album_id)
+        
+        if not tracks:
+            print(f"[{time.strftime('%F %T')}]   No tracks found for {album_title}, skipping", flush=True)
+            continue
+        
+        for track_title in tracks:
+            # Sanitize all fields for sldl input format
+            clean_artist = sanitize_for_sldl(artist)
+            clean_album = sanitize_for_sldl(album_title)
+            clean_title = sanitize_for_sldl(track_title)
+            
+            # Format for sldl with individual track search - using sanitized values
+            line = f'artist="{clean_artist}",album="{clean_album}",title="{clean_title}"'
+            output_lines.append(line)
+            total_tracks += 1
+            
+            if total_tracks % 50 == 0:
+                print(f"[{time.strftime('%F %T')}] Generated {total_tracks} tracks so far...", flush=True)
+
+print(f"[{time.strftime('%F %T')}] Total tracks generated: {total_tracks}", flush=True)
+
+# Output all tracks to the discography file
+with open(os.environ['DISCOGRAPHY_FILE'], 'w') as f:
+    for line in output_lines:
+        f.write(line + '\n')
+
+print(f"[{time.strftime('%F %T')}] Discography file written to: {os.environ['DISCOGRAPHY_FILE']}", flush=True)
+PYTHON_SCRIPT
+}
+
+# Call the function with the artists file
+generate_discography_bg "$ARTISTS_FILE"
+
+echo "[$(date '+%F %T')] Background discography generation completed (PID: $$)" >> "$LOGFILE"
+BACKGROUND_SCRIPT
+    
+    chmod +x "$bg_script"
+    
+    # Run the background script as a detached process with better signal isolation
+    setsid nohup "$bg_script" "$artists_file" "$DISCOGRAPHY_FILE" "$LOGFILE" "$MB_EMAIL" >/dev/null 2>&1 &
+    local bg_pid=$!
+    
+    echo "[$(date '+%F %T')] Started background discography generation (PID: $bg_pid)" >> "$LOGFILE"
+    echo "Background discography generation started (PID: $bg_pid)"
+    
+    # Wait for the process to start and create some output
+    sleep 5
+    
+    # Check if the background process is still running
+    if kill -0 $bg_pid 2>/dev/null; then
+      echo "Discography generation is running in background."
+      echo "Monitor progress with: tail -f $LOGFILE"
+      echo ""
+      echo "Waiting for discography generation to complete..."
+      echo "(This may take 10-30 minutes depending on number of artists)"
+      echo "You can press Ctrl+C to detach - the process will continue running."
+      
+      # Set up trap to allow clean detachment
+      detached=0
+      trap 'echo ""; echo "Detaching from background process..."; detached=1' INT
+      
+      # Wait for completion but allow user to detach
+      while kill -0 $bg_pid 2>/dev/null && [[ $detached -eq 0 ]]; do
+        sleep 10
+        
+        # Show periodic progress if file is being written
+        if [[ -f "$DISCOGRAPHY_FILE" ]]; then
+          local current_tracks=$(wc -l < "$DISCOGRAPHY_FILE" 2>/dev/null || echo 0)
+          if [[ $current_tracks -gt 0 ]]; then
+            echo "[$(date '+%H:%M:%S')] Progress: $current_tracks tracks generated so far..."
+          fi
+        fi
+      done
+      
+      # Reset trap
+      trap - INT
+      
+      if [[ $detached -eq 1 ]]; then
+        echo "Successfully detached. Background process continues running."
+        echo "Monitor progress with: tail -f $LOGFILE"
+        echo "Process will continue and downloads will start automatically when complete."
+        
+        # Wait for discography file to be completed in background
+        echo "Waiting for discography generation to complete in background..."
+        while kill -0 $bg_pid 2>/dev/null; do
+          sleep 30
+        done
+      fi
+    else
+      echo "[$(date '+%F %T')] Background process failed to start" >> "$LOGFILE"
+      echo "ERROR: Background discography generation failed to start"
+      return 1
+    fi
+    
+    # Clean up background script
+    rm -f "$bg_script"
+  fi
+  
+  # Check if we have tracks
+  if [[ ! -f "$DISCOGRAPHY_FILE" || ! -s "$DISCOGRAPHY_FILE" ]]; then
+    echo "ERROR: No discography file generated or file is empty"
+    echo "Check the log file for errors: $LOGFILE"
+    return 1
+  fi
   
   local track_count=$(wc -l < "$DISCOGRAPHY_FILE")
   echo "[$(date '+%F %T')] Generated $track_count individual tracks for download" >> "$LOGFILE"
@@ -1167,11 +1412,10 @@ EOF
     fi
   done
   
-  # Add list input parameters for individual track downloads (removed --album flag)
+  # Add list input parameters for individual track downloads
   modified_cmd+=(
     "--input-type" "list"
     "--input" "$DISCOGRAPHY_FILE"
-    "--album-art"
   )
   
   echo "[$(date '+%F %T')] Starting individual track downloads..." >> "$LOGFILE"
@@ -1179,6 +1423,7 @@ EOF
   echo ""
   echo "Starting download of $track_count individual tracks..."
   echo "This will take a while. Progress will be logged to $LOGFILE"
+  echo "You can safely detach from this session."
   
   "${modified_cmd[@]}" >> "$LOGFILE" 2>&1 &
   local sldl_pid=$!
