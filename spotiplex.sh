@@ -1112,7 +1112,7 @@ def get_musicbrainz_id(artist_name, max_retries=2):
     return None
 
 def get_albums_for_artist(artist_name, mbid):
-    print(f"[{time.strftime('%F %T')}] Fetching albums for: {artist_name}", flush=True)
+    print(f"[{time.strftime('%F %T')}] Fetching releases for: {artist_name}", flush=True)
     albums = []
     
     params = {
@@ -1135,8 +1135,8 @@ def get_albums_for_artist(artist_name, mbid):
                 primary_type = rg.get("primary-type", "N/A")
                 secondary_types = rg.get("secondary-types", [])
                 
-                # Only consider Albums and EPs as potential mainline releases
-                if primary_type.lower() not in ["album", "ep"]:
+                # FIXED: Now include Albums, EPs, AND Singles as potential mainline releases
+                if primary_type.lower() not in ["album", "ep", "single"]:
                     continue
                 
                 # Skip releases with certain secondary types that indicate non-mainline
@@ -1182,16 +1182,16 @@ def get_albums_for_artist(artist_name, mbid):
             
             time.sleep(SLEEP_TIME)
             
-        print(f"[{time.strftime('%F %T')}] Found {len(albums)} mainline albums for {artist_name}", flush=True)
+        print(f"[{time.strftime('%F %T')}] Found {len(albums)} mainline releases (albums/EPs/singles) for {artist_name}", flush=True)
         
     except requests.exceptions.Timeout:
-        print(f"[{time.strftime('%F %T')}] Timeout fetching albums for {artist_name}, skipping", flush=True)
+        print(f"[{time.strftime('%F %T')}] Timeout fetching releases for {artist_name}, skipping", flush=True)
         time.sleep(SLEEP_TIME * 3)  # Back off more on timeout
     except requests.exceptions.RequestException as e:
-        print(f"[{time.strftime('%F %T')}] Request error fetching albums for {artist_name}: {e}", flush=True)
+        print(f"[{time.strftime('%F %T')}] Request error fetching releases for {artist_name}: {e}", flush=True)
         time.sleep(SLEEP_TIME * 2)  # Back off on request errors
     except Exception as e:
-        print(f"[{time.strftime('%F %T')}] Album fetch failed for {artist_name}: {e}", flush=True)
+        print(f"[{time.strftime('%F %T')}] Release fetch failed for {artist_name}: {e}", flush=True)
     
     return albums
 
@@ -1268,15 +1268,16 @@ for artist_idx, artist in enumerate(artists, 1):
         continue
     
     albums = get_albums_for_artist(artist, mbid)
-    print(f"[{time.strftime('%F %T')}] Processing {len(albums)} albums for {artist}", flush=True)
+    print(f"[{time.strftime('%F %T')}] Processing {len(albums)} releases for {artist}", flush=True)
     
     for i, album in enumerate(albums, 1):
         album_title = album['title']
         album_id = album['id']
+        album_type = album['primary_type']
         
-        print(f"[{time.strftime('%F %T')}]   Album {i}/{len(albums)}: {album_title}", flush=True)
+        print(f"[{time.strftime('%F %T')}]   Release {i}/{len(albums)}: {album_title} ({album_type})", flush=True)
         
-        # Get individual tracks for this album
+        # Get individual tracks for this album/single
         tracks = get_tracks_for_album(artist, album_title, album_id)
         
         if not tracks:
